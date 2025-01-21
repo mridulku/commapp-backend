@@ -17,10 +17,10 @@ console.log("JWT_SECRET in use:", process.env.JWT_SECRET); // Add this line
 const corsOptions = {
   // Replace this with your actual Codespaces origin:
   // e.g. "https://abcd-3000.preview.app.github.dev"
-  origin: ["https://commapp.vercel.app/authlogin",
-  "https://www.talk-ai.co/authlogin",
-  "https://commapp-mriduls-projects-ac266a64.vercel.app/authlogin",
-  "https://commapp-git-main-mriduls-projects-ac266a64.vercel.app/authlogin",
+  origin: ["https://commapp.vercel.app",
+  "https://www.talk-ai.co",
+  "https://commapp-mriduls-projects-ac266a64.vercel.app",
+  "https://commapp-git-main-mriduls-projects-ac266a64.vercel.app",
   "https://bookish-guide-pjpjjpjgwxxgc7x5j-3000.app.github.dev"],
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
