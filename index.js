@@ -1620,76 +1620,59 @@ app.get("/api/quizzes", async (req, res) => {
 
 
 
-app.post("/api/learnerpersona", authenticateToken, async (req, res) => {
-  try {
-    // The request body looks like:
-    // {
-    //   category: "academic" | "competitive" | "vocational" | "casual",
-    //   answers: { ...all the sub-form fields... }
-    // }
-    const { category, answers } = req.body;
+// No major changes needed here. The "answers" now contains pdfLink for each course.
 
-    // The token should have something like:
-    // {
-    //   id: "acbhbtiODoPPcks2CP6Z",
-    //   username: "john_doe",
-    //   ...
-    // }
+app.post("/api/learnerpersona", authenticateToken, async (req, res) => {
+  
+  console.log("Inside learnerpersona route");
+
+  
+  try {
+    const { category, answers } = req.body;
     const { id, username } = req.user || {};
 
     if (!id && !username) {
-      return res
-        .status(400)
-        .json({ success: false, error: "No user identifier (id or username) in token." });
+      return res.status(400).json({
+        success: false,
+        error: "No user identifier in token.",
+      });
     }
 
-    // Attempt to find user doc by ID first
+    // Find user doc in Firestore
     let userDocId = null;
     const docRefById = db.collection("users").doc(id);
     const docSnapById = await docRefById.get();
 
     if (docSnapById.exists) {
-      // We found the doc via ID
       userDocId = id;
-      console.log("Found user doc by ID:", userDocId);
     } else {
-      // If doc with this ID does not exist, try username
-      console.log("No doc found for ID:", id, "=> trying username:", username);
-
       const snapshot = await db
         .collection("users")
         .where("username", "==", username)
         .get();
 
       if (snapshot.empty) {
-        console.error("No user doc found for username:", username);
         return res
           .status(404)
           .json({ success: false, error: "User not found in Firestore." });
       }
 
-      // Assuming username is unique, take the first doc
       userDocId = snapshot.docs[0].id;
-      console.log("Found user doc by username. Doc ID:", userDocId);
     }
 
-    // 3) Set onboardingComplete = true on the user doc
-    //    If doc doesn't exist, this throws an error => handled by catch()
+    // Mark onboardingComplete
     await db.collection("users").doc(userDocId).update({
       onboardingComplete: true,
     });
-    console.log(`Updated user doc ${userDocId} => onboardingComplete: true`);
 
-    // 4) Optionally store the full form data in its own collection, e.g. "learnerPersonas"
+    // Create a record in "learnerPersonas"
     const newDocRef = await db.collection("learnerPersonas").add({
       userId: userDocId,
       category,
       answers,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
-    console.log("Created new doc in learnerPersonas:", newDocRef.id);
 
-    // 5) Return success to the frontend
     return res.status(200).json({
       success: true,
       message: "User onboarding complete and form data stored.",
