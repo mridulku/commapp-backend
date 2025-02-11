@@ -1619,6 +1619,125 @@ app.get("/api/quizzes", async (req, res) => {
 });
 
 
+
+app.post("/api/learnerpersona", authenticateToken, async (req, res) => {
+  try {
+    // The request body looks like:
+    // {
+    //   category: "academic" | "competitive" | "vocational" | "casual",
+    //   answers: { ...all the sub-form fields... }
+    // }
+    const { category, answers } = req.body;
+
+    // The token should have something like:
+    // {
+    //   id: "acbhbtiODoPPcks2CP6Z",
+    //   username: "john_doe",
+    //   ...
+    // }
+    const { id, username } = req.user || {};
+
+    if (!id && !username) {
+      return res
+        .status(400)
+        .json({ success: false, error: "No user identifier (id or username) in token." });
+    }
+
+    // Attempt to find user doc by ID first
+    let userDocId = null;
+    const docRefById = db.collection("users").doc(id);
+    const docSnapById = await docRefById.get();
+
+    if (docSnapById.exists) {
+      // We found the doc via ID
+      userDocId = id;
+      console.log("Found user doc by ID:", userDocId);
+    } else {
+      // If doc with this ID does not exist, try username
+      console.log("No doc found for ID:", id, "=> trying username:", username);
+
+      const snapshot = await db
+        .collection("users")
+        .where("username", "==", username)
+        .get();
+
+      if (snapshot.empty) {
+        console.error("No user doc found for username:", username);
+        return res
+          .status(404)
+          .json({ success: false, error: "User not found in Firestore." });
+      }
+
+      // Assuming username is unique, take the first doc
+      userDocId = snapshot.docs[0].id;
+      console.log("Found user doc by username. Doc ID:", userDocId);
+    }
+
+    // 3) Set onboardingComplete = true on the user doc
+    //    If doc doesn't exist, this throws an error => handled by catch()
+    await db.collection("users").doc(userDocId).update({
+      onboardingComplete: true,
+    });
+    console.log(`Updated user doc ${userDocId} => onboardingComplete: true`);
+
+    // 4) Optionally store the full form data in its own collection, e.g. "learnerPersonas"
+    const newDocRef = await db.collection("learnerPersonas").add({
+      userId: userDocId,
+      category,
+      answers,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    console.log("Created new doc in learnerPersonas:", newDocRef.id);
+
+    // 5) Return success to the frontend
+    return res.status(200).json({
+      success: true,
+      message: "User onboarding complete and form data stored.",
+    });
+  } catch (error) {
+    console.error("Error in /api/learnerpersona route:", error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || "Internal server error",
+    });
+  }
+});
+
+// Add this route to your index.js file (or wherever you define routes)
+// e.g., right below "app.get('/test-firestore', ...)" block:
+
+app.post("/onboardingassessment", authenticateToken, async (req, res) => {
+  try {
+    const assessmentData = req.body;
+
+    // If you want to associate data with a user:
+    // const userId = req.user?.id; // if using authenticateToken
+    // assessmentData.userId = userId;
+
+    assessmentData.userId = req.user.id;
+
+
+    // Save the data in the "onboardingAssessments" collection
+    const docRef = await db.collection("onboardingAssessments").add(assessmentData);
+
+    res.status(200).json({
+      success: true,
+      message: "Assessment data saved successfully!",
+      docId: docRef.id,
+    });
+  } catch (error) {
+    console.error("Error saving assessment data:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to save assessment data",
+      error: error.message,
+    });
+  }
+});
+
+
+
+
 /*
   Add your app.listen(...) here, for example:
 */
