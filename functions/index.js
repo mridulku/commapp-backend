@@ -1,63 +1,130 @@
 /**
- * index.js
- *
- * This Cloud Function triggers on PDF uploads, parses the PDF using
- * "pdf-parse", and stores the extracted text in Firestore.
+ * index.js (Firebase Functions v2 example)
  */
 
-const{onObjectFinalized}=require("firebase-functions/v2/storage");
-const logger=require("firebase-functions/logger");
-const admin=require("firebase-admin");
-const pdfParse=require("pdf-parse");
-const{Storage}=require("@google-cloud/storage");
-const fs=require("fs");
-const path=require("path");
+const { onObjectFinalized } = require("firebase-functions/v2/storage");
+const { onDocumentCreated } = require("firebase-functions/v2/firestore");
+const logger = require("firebase-functions/logger");  // for structured logging
+const admin = require("firebase-admin");
+const pdfParse = require("pdf-parse");
+const { Storage } = require("@google-cloud/storage");
+const fs = require("fs");
+const path = require("path");
+const openaiPackage = require("openai");
+const Configuration = openaiPackage.Configuration;
+const OpenAIApi = openaiPackage.OpenAIApi;
+
+// Log which OpenAI version we expect (from our local package.json)
+logger.info(
+  "OpenAI version (from local package.json):",
+  require("./package.json").dependencies["openai"]
+);
 
 admin.initializeApp();
+const storage = new Storage();
 
-const storage=new Storage();
+/**
+ * 1) TRIGGER ON PDF UPLOAD (v2 Storage)
+ *    - Parse PDF text with pdf-parse
+ *    - Store the text in Firestore ("pdfExtracts")
+ */
+exports.onPDFUpload = onObjectFinalized(async (event) => {
+  try {
+    const object = event.data;
+    const bucketName = object.bucket;
+    const filePath = object.name;
+    const contentType = object.contentType;
 
-exports.onPDFUpload=onObjectFinalized(
-  async(event)=>{
-    try {
-      const object=event.data;
-      const bucketName=object.bucket;
-      const filePath=object.name;
-      const contentType=object.contentType;
-
-      if(!contentType||!contentType.includes("pdf")) {
-        logger.info("Not a PDF, ignoring...");
-        return;
-      }
-
-      logger.info(`PDF detected at path: ${filePath}`);
-
-      const tempFilePath=path.join(
-        "/tmp",
-        path.basename(filePath)
-      );
-
-      await storage.bucket(bucketName).file(filePath)
-        .download({destination: tempFilePath});
-
-      logger.info(`PDF downloaded locally to ${tempFilePath}`);
-
-      const dataBuffer=fs.readFileSync(tempFilePath);
-      const parsed=await pdfParse(dataBuffer);
-      const rawText=parsed.text;
-
-      logger.info(`Parsed PDF text length: ${rawText.length}`);
-
-      const db=admin.firestore();
-      await db.collection("pdfExtracts").add({
-        filePath,
-        text: rawText,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
-
-      logger.info("Successfully stored PDF text in Firestore.");
-    } catch(error) {
-      logger.error("Error in onPDFUpload function:", error);
+    if (!contentType || !contentType.includes("pdf")) {
+      logger.info("Not a PDF. Skipping.");
+      return;
     }
+
+    logger.info(`PDF detected at path: ${filePath}`);
+
+    // Download to temporary directory
+    const tempFilePath = path.join("/tmp", path.basename(filePath));
+    await storage.bucket(bucketName).file(filePath).download({ destination: tempFilePath });
+    logger.info(`PDF downloaded locally to ${tempFilePath}`);
+
+    // Parse PDF into text
+    const dataBuffer = fs.readFileSync(tempFilePath);
+    const parsed = await pdfParse(dataBuffer);
+    const rawText = parsed.text;
+    logger.info(`Parsed PDF text length: ${rawText.length}`);
+
+    // Store in Firestore
+    const db = admin.firestore();
+    await db.collection("pdfExtracts").add({
+      filePath,
+      text: rawText,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    logger.info("Stored PDF text in Firestore (pdfExtracts).");
+  } catch (error) {
+    logger.error("Error in onPDFUpload:", error);
   }
-);
+});
+
+/**
+ * 2) TRIGGER ON DOCUMENT CREATION IN "pdfExtracts" (v2 Firestore)
+ *    - Calls OpenAI (ChatGPT) to summarize the PDF text
+ *    - Stores the summary in a new collection "pdfSummaries"
+ */
+exports.summarizePDF = onDocumentCreated("pdfExtracts/{docId}", async (event) => {
+  try {
+    // event.data is the newly created Firestore document (QueryDocumentSnapshot)
+    const docSnap = event.data;
+    if (!docSnap) {
+      logger.warn("No document snapshot found in event.");
+      return;
+    }
+
+    // Get fields from doc
+    const data = docSnap.data() || {};
+    const text = data.text;
+    if (!text) {
+      logger.warn("Document has no 'text' field.");
+      return;
+    }
+
+    // Pull OpenAI key from environment variables
+    const openAiKey = process.env.OPENAI_API_KEY;
+    if (!openAiKey) {
+      throw new Error("OPENAI_API_KEY is not set in environment variables!");
+    }
+
+    // Initialize OpenAI
+    const configuration = new Configuration({ apiKey: openAiKey });
+    const openai = new OpenAIApi(configuration);
+
+    // Prompt for summarization
+    const prompt = `Summarize the following text in a few bullet points:\n\n${text}`;
+
+    const completion = await openai.createChatCompletion({
+      model: "gpt-4",
+      messages: [
+        { role: "system", content: "You are a helpful assistant." },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.7,
+    });
+
+    // Extract the summary from the response
+    const summary = completion.data.choices[0].message.content.trim();
+    logger.info("Summary generated by ChatGPT:", summary);
+
+    // Store the summary in Firestore
+    const db = admin.firestore();
+    await db.collection("pdfSummaries").add({
+      pdfDocId: event.params.docId,
+      summary,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    logger.info("Successfully stored summary in pdfSummaries.");
+  } catch (error) {
+    logger.error("Error in summarizePDF:", error);
+  }
+});
