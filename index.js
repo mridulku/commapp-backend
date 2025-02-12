@@ -187,21 +187,38 @@ app.post("/login", async (req, res) => {
 
     // Generate a JWT token for the user
     const token = jwt.sign(
-      { id: userDoc.id, username: userData.username, role: userData.role },
+      {
+        id: userDoc.id,
+        username: userData.username,
+        role: userData.role,
+      },
       process.env.JWT_SECRET,
       { expiresIn: "1h" }
     );
 
+    // -------------- NEW CODE: Store login timestamp --------------
+    await db.collection("loginTimestamps").add({
+      userId: userDoc.id,           // The Firestore doc ID of the user
+      username: userData.username,  // Optional: store username as well
+      timestamp: new Date(),        // Or use FieldValue.serverTimestamp()
+    });
+    // -------------------------------------------------------------
+
+    // Send back success, token, and user object
     res.json({
       success: true,
       token,
-      user: { username: userData.username, role: userData.role },
+      user: {
+        username: userData.username,
+        role: userData.role,
+      },
     });
   } catch (error) {
     console.error("Error during login:", error);
     res.status(500).json({ error: "An error occurred during login." });
   }
 
+  // For debugging: verify JWT_SECRET is present
   console.log("JWT_SECRET during signing:", process.env.JWT_SECRET);
 });
 

@@ -33,8 +33,13 @@ async function addUser(username, password, role, preferences) {
 
 // Add users by calling addUser() with desired data
 async function main() {
-  await addUser("john_doe", "password123", "admin", { theme: "dark" });
-  await addUser("jane_smith", "secure456", "user", { theme: "light" });
+//  await addUser("john_doe", "password123", "admin", { theme: "dark" });
+//  await addUser("jane_smith", "secure456", "user", { theme: "light" });
+await addUser("ycombinator1", "password123", "user", { theme: "dark" });
+await addUser("ycombinator2", "password123", "user", { theme: "dark" });
+await addUser("ycombinator3", "password123", "user", { theme: "dark" });
+await addUser("ycombinator4", "password123", "user", { theme: "dark" });
+await addUser("ycombinator5", "password123", "user", { theme: "dark" });
   process.exit(); // Exit the script once done
 }
 
