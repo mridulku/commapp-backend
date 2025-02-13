@@ -37,6 +37,8 @@ exports.onPDFUpload = onObjectFinalized(async (event) => {
     // 1) Extract custom metadata
     const customMetadata = object.metadata || {};
     const category = customMetadata.category || "unspecified"; // default if missing
+    const courseName = customMetadata.courseName || "untitled-course";
+
 
     const bucketName = object.bucket;
     const filePath = object.name;
@@ -66,6 +68,7 @@ exports.onPDFUpload = onObjectFinalized(async (event) => {
       filePath,
       text: rawText,
       category, // Store the category from custom metadata
+      courseName,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
@@ -384,5 +387,133 @@ exports.sliceMarkerTextForChapter = onDocumentCreated("pdfChapters/{chapterId}",
     logger.info(`Stored fullText for chapter ${event.params.chapterId} (docId=${pdfDocId}).`);
   } catch (error) {
     logger.error("Error in sliceMarkerTextForChapter:", error);
+  }
+});
+
+
+exports.createBookDoc = onDocumentCreated("pdfExtracts/{docId}", async (event) => {
+  try {
+    const docSnap = event.data;
+    if (!docSnap) {
+      logger.info("No document snapshot found in event.");
+      return;
+    }
+
+    const data = docSnap.data() || {};
+    const courseName = data.courseName || "Untitled";
+    const categoryString = data.category || "Unspecified";
+    const docId = event.params.docId;
+
+    logger.info(`New pdfExtracts doc = ${docId}, courseName=${courseName}, category=${categoryString}`);
+
+    // 1) Query categories_demo by 'name'
+    const db = admin.firestore();
+    const catSnap = await db
+      .collection("categories_demo")
+      .where("name", "==", categoryString)
+      .limit(1)
+      .get();
+
+    let categoryId = null;
+    if (!catSnap.empty) {
+      categoryId = catSnap.docs[0].id;
+      logger.info(`Found category docId=${categoryId}`);
+    } else {
+      logger.info(`No matching category doc for name="${categoryString}"`);
+    }
+
+    // 2) Create a new doc in books_demo
+    const newBookRef = await db.collection("books_demo").add({
+      categoryId: categoryId,
+      name: courseName,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    logger.info(`Created books_demo doc id=${newBookRef.id}`);
+
+    // 3) Cross-reference back in pdfExtracts
+    await db.collection("pdfExtracts").doc(docId).update({
+      bookDemoId: newBookRef.id,
+    });
+
+    logger.info(`Updated pdfExtracts/${docId} with bookDemoId=${newBookRef.id}`);
+
+  } catch (error) {
+    logger.error("Error in createBookDoc function:", error);
+  }
+});
+
+
+
+exports.createChaptersDemo = onDocumentCreated("pdfChapters/{chapterId}", async (event) => {
+  try {
+    const docSnap = event.data;
+    if (!docSnap) {
+      logger.info("No document snapshot in createChaptersDemo event.");
+      return;
+    }
+
+    const data = docSnap.data() || {};
+    const pdfDocId = data.pdfDocId;        // from pdfChapters doc
+    const chapterTitle = data.title || ""; // from pdfChapters doc
+
+    if (!pdfDocId) {
+      logger.info("No pdfDocId in pdfChapters doc; cannot proceed.");
+      return;
+    }
+
+    // 1) Fetch the pdfExtracts doc using pdfDocId
+    const db = admin.firestore();
+    const pdfExtractRef = db.collection("pdfExtracts").doc(pdfDocId);
+    const pdfExtractSnap = await pdfExtractRef.get();
+    if (!pdfExtractSnap.exists) {
+      logger.info(`pdfExtract doc not found for docId=${pdfDocId}.`);
+      return;
+    }
+
+    const pdfExtractData = pdfExtractSnap.data() || {};
+    const courseName = pdfExtractData.courseName; // e.g. "fun", "Chemistry 101", etc.
+
+    if (!courseName) {
+      logger.info("No courseName in pdfExtracts doc. Unable to link to books_demo.");
+      return;
+    }
+
+    logger.info(
+      `Creating chapters_demo entry for chapter title="${chapterTitle}", pdfDocId=${pdfDocId}, courseName="${courseName}"`
+    );
+
+    // 2) Find the doc in books_demo whose name == courseName
+    //    Because we previously created a doc in books_demo with name=courseName
+    const booksSnap = await db
+      .collection("books_demo")
+      .where("name", "==", courseName)
+      .limit(1)
+      .get();
+
+    if (booksSnap.empty) {
+      logger.info(`No matching book in books_demo for name="${courseName}".`);
+      return;
+    }
+
+    // We have a matching book doc
+    const bookDoc = booksSnap.docs[0];
+    const bookId = bookDoc.id;
+
+    logger.info(`Matched book: id=${bookId}, name="${courseName}"`);
+
+    // 3) Create doc in chapters_demo
+    //    fields: { bookId, name (the chapter title) }
+    await db.collection("chapters_demo").add({
+      bookId,
+      name: chapterTitle, // or rename field if you prefer
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    logger.info(
+      `Successfully created chapters_demo doc referencing bookId=${bookId}, name="${chapterTitle}".`
+    );
+  } catch (error) {
+    logger.error("Error in createChaptersDemo function:", error);
   }
 });
