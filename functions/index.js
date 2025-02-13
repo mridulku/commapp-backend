@@ -34,6 +34,10 @@ const storage = new Storage();
 exports.onPDFUpload = onObjectFinalized(async (event) => {
   try {
     const object = event.data;
+    // 1) Extract custom metadata
+    const customMetadata = object.metadata || {};
+    const category = customMetadata.category || "unspecified"; // default if missing
+
     const bucketName = object.bucket;
     const filePath = object.name;
     const contentType = object.contentType;
@@ -45,27 +49,32 @@ exports.onPDFUpload = onObjectFinalized(async (event) => {
 
     logger.info(`PDF detected at path: ${filePath}`);
 
+    // 2) Download locally
     const tempFilePath = path.join("/tmp", path.basename(filePath));
     await storage.bucket(bucketName).file(filePath).download({ destination: tempFilePath });
     logger.info(`PDF downloaded locally to ${tempFilePath}`);
 
+    // 3) Parse PDF
     const dataBuffer = fs.readFileSync(tempFilePath);
     const parsed = await pdfParse(dataBuffer);
     const rawText = parsed.text;
     logger.info(`Parsed PDF text length: ${rawText.length}`);
 
+    // 4) Store in Firestore, including `category`
     const db = admin.firestore();
     await db.collection("pdfExtracts").add({
       filePath,
       text: rawText,
+      category, // Store the category from custom metadata
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    logger.info("Stored PDF text in Firestore (pdfExtracts).");
+    logger.info(`Stored PDF text + category="${category}" in Firestore (pdfExtracts).`);
   } catch (error) {
     logger.error("Error in onPDFUpload:", error);
   }
 });
+
 
 /**
  * 2) TRIGGER ON DOCUMENT CREATION IN "pdfExtracts"
