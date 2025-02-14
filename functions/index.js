@@ -142,22 +142,55 @@ exports.addMarkersAndSummarize = onDocumentCreated("pdfExtracts/{docId}", async 
     const openai = new OpenAIApi(configuration);
 
     const prompt = `
-You are a helpful assistant. I have text with markers like [INDEX=1000], [INDEX=2000], etc.
-I want to split this text into 10 chapters. Please provide a structured JSON response containing:
+You are a structured and precise assistant. I have a large block of text with markers like [INDEX=1000], [INDEX=2000], etc. 
 
-1. An array called "chapters".
-2. Each entry in "chapters" is an object with:
-   - "title": a short descriptive title of the chapter,
-   - "summary": a short summary of the chapter,
-   - "startMarker": the marker where the chapter starts,
-   - "endMarker": the marker where the chapter ends.
+Your task is to divide this text into well-defined **chapters** and return a structured JSON response. Follow these rules:
 
-Do NOT include any additional commentary outside the JSON. Only return valid JSON so I can parse it. Also ensure that in the json you proide you cover all the content meaning that if chapter 1 starts at someindex and ends at some index, the next chapter, should start at the index where the last chapter ended and the final chapter should end at almost the index at which the content ends.
+### **Output Structure**
+- Provide a JSON object containing an array called **"chapters"**.
+- Each entry in **"chapters"** must be an object with:
+  - **"title"**: A short but descriptive title (e.g., "1. Introduction to X").
+  - **"summary"**: A concise summary of the chapter’s main theme.
+  - **"startMarker"**: The exact marker where the chapter starts.
+  - **"endMarker"**: The exact marker where the chapter ends.
 
-Also, the names of the chapters you provide should start with 1. xxx, 2. xxx, 3. xxx, etc. meaning first the number and then name of chapter.
+### **Key Constraints**
+1. The **first chapter** must start at the first available marker, and each subsequent chapter must begin at the **end marker** of the previous chapter.
+2. The **last chapter** must end at or very near the last marker of the content.
+3. Ensure a **reasonable number of chapters** that reflect the content’s logical structure.
+4. **Only return valid JSON** without any extra text, explanations, or formatting.
 
+### **Example Output**
+\`\`\`json
+{
+  "chapters": [
+    {
+      "title": "1. Don’t Try",
+      "summary": "This chapter discusses the story of Charles Bukowski, an alcoholic and poet, whose life embodies the American Dream of perseverance. Despite years of failure, Bukowski achieved fame not by trying to be special but by embracing his failures and sharing his honest self.",
+      "startMarker": "[INDEX=1000]",
+      "endMarker": "[INDEX=6000]"
+    },
+    {
+      "title": "2. Happiness Is a Problem",
+      "summary": "The narrative follows the story of a prince who grows up in a sheltered environment and later discovers the harsh realities of life. This chapter emphasizes that happiness is not something to be achieved but rather comes from solving life's problems.",
+      "startMarker": "[INDEX=34000]",
+      "endMarker": "[INDEX=48000]"
+    },
+    {
+      "title": "3. You Are Not Special",
+      "summary": "This chapter explores the dangers of entitlement and the illusion of exceptionalism in society. It critiques the self-esteem movement that has led many to believe they are special, while highlighting that adversity and failure are essential for personal growth.",
+      "startMarker": "[INDEX=62000]",
+      "endMarker": "[INDEX=90000]"
+    }
+  ]
+}
+\`\`\`
+
+### **Input**
+\`\`\`
 Text with markers:
 ${textWithMarkers}
+\`\`\`
 `.trim();
 
     const completion = await openai.createChatCompletion({
@@ -693,23 +726,56 @@ exports.summarizeFullTextMarkers = onDocumentUpdated("pdfChapters/{chapterId}", 
 
     // Similar to your existing prompt for chunking into chapters, adapt as needed
     const prompt = `
-You are a helpful assistant. I have text with markers like [INDEX=1000], [INDEX=2000], etc.
-I want you to create sub-chapters from this text. Please provide a structured JSON response containing:
-
-1. An array called "subChapters".
-2. Each entry in "subChapters" is an object with:
-   - "title": a short descriptive title,
-   - "summary": a short summary,
-   - "startMarker": the marker where the sub-chapter starts,
-   - "endMarker": the marker where it ends.
-
-Do NOT include any additional commentary outside the JSON. Only return valid JSON so I can parse it. Also ensure that in the json you proide you cover all the content meaning that if subchapter 1 starts at someindex and ends at some index, the next subchapter, should start at the index where the last subchapter ended and the final subchapter should end at almost the index at which the content ends.
-
-Also, the names of the subchapters you provide should start with 1. xxx, 2. xxx, 3. xxx, etc. meaning first the number and then name of subchapter.
-
-Text with markers:
-${newMarkers}
-`.trim();
+    You are a structured and precise assistant. I have a block of text with markers like [INDEX=1000], [INDEX=2000], etc. 
+    
+    Your task is to divide this text into **5-6 well-structured sub-chapters** and return a JSON response. Follow these rules:
+    
+    ### **Output Structure**
+    - Provide a JSON object containing an array called **"subChapters"**.
+    - Each entry in **"subChapters"** must be an object with:
+      - **"title"**: A short but descriptive title (e.g., "1. Overview of X").
+      - **"summary"**: A concise summary of the sub-chapter’s main theme.
+      - **"startMarker"**: The exact marker where the sub-chapter starts.
+      - **"endMarker"**: The exact marker where the sub-chapter ends.
+    
+    ### **Key Constraints**
+    1. The **first sub-chapter** must start at the first available marker, and each subsequent sub-chapter must begin at the **end marker** of the previous one.
+    2. The **last sub-chapter** must end at or very near the last marker of the content.
+    3. Ensure **5-6 meaningful sub-chapters**, evenly distributing content logically.
+    4. **Only return valid JSON** without any extra text, explanations, or formatting.
+    
+    ### **Example Output**
+    \`\`\`json
+    {
+      "subChapters": [
+        {
+          "title": "1. The Paradox of Bukowski",
+          "summary": "An introduction to Charles Bukowski's life, highlighting his failures and struggles as a writer.",
+          "startMarker": "[INDEX=500]",
+          "endMarker": "[INDEX=1000]"
+        },
+        {
+          "title": "2. The Rise of a Misfit",
+          "summary": "This section explores how Bukowski’s failures shaped his writing style, making him a cult icon.",
+          "startMarker": "[INDEX=1000]",
+          "endMarker": "[INDEX=2000]"
+        },
+        {
+          "title": "3. A Life Without Pretense",
+          "summary": "Bukowski’s unfiltered approach to life and writing, and how his honesty resonated with millions.",
+          "startMarker": "[INDEX=2000]",
+          "endMarker": "[INDEX=3500]"
+        }
+      ]
+    }
+    \`\`\`
+    
+    ### **Input**
+    \`\`\`
+    Text with markers:
+    ${newMarkers}
+    \`\`\`
+    `.trim();
 
     const completion = await openai.createChatCompletion({
       model: "gpt-4o-mini", // or whichever model suits your needs
