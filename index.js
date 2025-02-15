@@ -6,6 +6,7 @@ const admin = require("firebase-admin");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
+
 const app = express();
 
 // Debugging the loaded JWT_SECRET
@@ -161,11 +162,12 @@ app.get("/get-users", async (req, res) => {
 });
 
 // Route for user login
+
 app.post("/login", async (req, res) => {
   const { username, password } = req.body;
 
   try {
-    // Query Firestore for the user with the given username
+    // 1) Query Firestore for the user with the given username
     const usersSnapshot = await db
       .collection("users")
       .where("username", "==", username)
@@ -179,13 +181,14 @@ app.post("/login", async (req, res) => {
     const userDoc = usersSnapshot.docs[0];
     const userData = userDoc.data();
 
-    // Compare the provided password with the hashed password
+    // 2) Compare the provided password with the stored (hashed) password
     const isPasswordValid = await bcrypt.compare(password, userData.password);
     if (!isPasswordValid) {
       return res.status(401).json({ error: "Invalid username or password." });
     }
 
-    // Generate a JWT token for the user
+    // 3) Generate your existing JWT token for the server’s own logic if you want
+    //    (You can skip this if you no longer need a separate token.)
     const token = jwt.sign(
       {
         id: userDoc.id,
@@ -196,21 +199,34 @@ app.post("/login", async (req, res) => {
       { expiresIn: "1h" }
     );
 
-    // -------------- NEW CODE: Store login timestamp --------------
-    await db.collection("loginTimestamps").add({
-      userId: userDoc.id,           // The Firestore doc ID of the user
-      username: userData.username,  // Optional: store username as well
-      timestamp: new Date(),        // Or use FieldValue.serverTimestamp()
-    });
-    // -------------------------------------------------------------
+    // 4) Also create a Firebase Custom Token (using the Admin SDK)
+    //    This is the important piece for letting the front end do signInWithCustomToken().
+    const firebaseCustomToken = await admin
+      .auth()
+      .createCustomToken(userDoc.id, {
+        username: userData.username,
+        role: userData.role,
+      });
+    // The first param is the uid to assign in Firebase Auth
+    // The second param is optional "additional claims"
 
-    // Send back success, token, and user object
+    // 5) (Optional) Log a timestamp if desired
+    await db.collection("loginTimestamps").add({
+      userId: userDoc.id, // The doc ID of the user
+      username: userData.username,
+      timestamp: new Date(),
+    });
+
+    // 6) Send back success, your original token if you still want it, plus the new firebaseCustomToken
     res.json({
       success: true,
-      token,
+      token, // your existing JWT
+      firebaseCustomToken, // new
       user: {
         username: userData.username,
         role: userData.role,
+        onboardingComplete: userData.onboardingComplete || false,
+        // any other fields you want
       },
     });
   } catch (error) {
