@@ -6,6 +6,7 @@ const admin = require("firebase-admin");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
+
 const app = express();
 
 // Debugging the loaded JWT_SECRET
@@ -161,11 +162,12 @@ app.get("/get-users", async (req, res) => {
 });
 
 // Route for user login
+
 app.post("/login", async (req, res) => {
   const { username, password } = req.body;
 
   try {
-    // Query Firestore for the user with the given username
+    // 1) Query Firestore for the user with the given username
     const usersSnapshot = await db
       .collection("users")
       .where("username", "==", username)
@@ -179,29 +181,60 @@ app.post("/login", async (req, res) => {
     const userDoc = usersSnapshot.docs[0];
     const userData = userDoc.data();
 
-    // Compare the provided password with the hashed password
+    // 2) Compare the provided password with the stored (hashed) password
     const isPasswordValid = await bcrypt.compare(password, userData.password);
     if (!isPasswordValid) {
       return res.status(401).json({ error: "Invalid username or password." });
     }
 
-    // Generate a JWT token for the user
+    // 3) Generate your existing JWT token for the server’s own logic if you want
+    //    (You can skip this if you no longer need a separate token.)
     const token = jwt.sign(
-      { id: userDoc.id, username: userData.username, role: userData.role },
+      {
+        id: userDoc.id,
+        username: userData.username,
+        role: userData.role,
+      },
       process.env.JWT_SECRET,
       { expiresIn: "1h" }
     );
 
+    // 4) Also create a Firebase Custom Token (using the Admin SDK)
+    //    This is the important piece for letting the front end do signInWithCustomToken().
+    const firebaseCustomToken = await admin
+      .auth()
+      .createCustomToken(userDoc.id, {
+        username: userData.username,
+        role: userData.role,
+      });
+    // The first param is the uid to assign in Firebase Auth
+    // The second param is optional "additional claims"
+
+    // 5) (Optional) Log a timestamp if desired
+    await db.collection("loginTimestamps").add({
+      userId: userDoc.id, // The doc ID of the user
+      username: userData.username,
+      timestamp: new Date(),
+    });
+
+    // 6) Send back success, your original token if you still want it, plus the new firebaseCustomToken
     res.json({
       success: true,
-      token,
-      user: { username: userData.username, role: userData.role },
+      token, // your existing JWT
+      firebaseCustomToken, // new
+      user: {
+        username: userData.username,
+        role: userData.role,
+        onboardingComplete: userData.onboardingComplete || false,
+        // any other fields you want
+      },
     });
   } catch (error) {
     console.error("Error during login:", error);
     res.status(500).json({ error: "An error occurred during login." });
   }
 
+  // For debugging: verify JWT_SECRET is present
   console.log("JWT_SECRET during signing:", process.env.JWT_SECRET);
 });
 
@@ -1106,16 +1139,26 @@ app.get("/api/categories", async (req, res) => {
 */
 app.get("/api/books", async (req, res) => {
   try {
-    const { categoryId } = req.query;
+    // Extract categoryId and userId from query params
+    const { categoryId, userId } = req.query;
 
-    // 1) Fetch books (optionally filtered by categoryId)
+    // 1) Build a query referencing "books_demo"
     let booksRef = db.collection("books_demo");
+
+    // Filter by category if provided
     if (categoryId) {
       booksRef = booksRef.where("categoryId", "==", categoryId);
     }
+
+    // Filter by userId if provided
+    if (userId) {
+      booksRef = booksRef.where("userId", "==", userId);
+    }
+
+    // Fetch the filtered books
     const booksSnap = await booksRef.get();
 
-    // 2) Fetch all chapters (we'll filter in-memory if needed)
+    // 2) Fetch all chapters (in-memory link up)
     const chaptersSnap = await db.collection("chapters_demo").get();
 
     // 3) Fetch all subChapters
@@ -1162,7 +1205,6 @@ app.get("/api/books", async (req, res) => {
     });
 
     // Now link chapters to the books we actually have in booksMap
-    // (these are already filtered by categoryId if it was provided)
     Object.values(chaptersMap).forEach((chap) => {
       if (booksMap[chap.bookId]) {
         booksMap[chap.bookId].chapters.push({
@@ -1172,7 +1214,7 @@ app.get("/api/books", async (req, res) => {
       }
     });
 
-    // Convert booksMap to array, then sort
+    // Convert booksMap to array
     let booksArray = Object.values(booksMap);
 
     // Sort books by bookName
@@ -1206,7 +1248,6 @@ app.get("/api/books", async (req, res) => {
     return res.status(500).json({ error: "Internal server error" });
   }
 });
-
 /*
   ----------------------------------------------------------
   3) GET /api/user-progress?userId=...
@@ -1620,76 +1661,59 @@ app.get("/api/quizzes", async (req, res) => {
 
 
 
-app.post("/api/learnerpersona", authenticateToken, async (req, res) => {
-  try {
-    // The request body looks like:
-    // {
-    //   category: "academic" | "competitive" | "vocational" | "casual",
-    //   answers: { ...all the sub-form fields... }
-    // }
-    const { category, answers } = req.body;
+// No major changes needed here. The "answers" now contains pdfLink for each course.
 
-    // The token should have something like:
-    // {
-    //   id: "acbhbtiODoPPcks2CP6Z",
-    //   username: "john_doe",
-    //   ...
-    // }
+app.post("/api/learnerpersona", authenticateToken, async (req, res) => {
+  
+  console.log("Inside learnerpersona route");
+
+  
+  try {
+    const { category, answers } = req.body;
     const { id, username } = req.user || {};
 
     if (!id && !username) {
-      return res
-        .status(400)
-        .json({ success: false, error: "No user identifier (id or username) in token." });
+      return res.status(400).json({
+        success: false,
+        error: "No user identifier in token.",
+      });
     }
 
-    // Attempt to find user doc by ID first
+    // Find user doc in Firestore
     let userDocId = null;
     const docRefById = db.collection("users").doc(id);
     const docSnapById = await docRefById.get();
 
     if (docSnapById.exists) {
-      // We found the doc via ID
       userDocId = id;
-      console.log("Found user doc by ID:", userDocId);
     } else {
-      // If doc with this ID does not exist, try username
-      console.log("No doc found for ID:", id, "=> trying username:", username);
-
       const snapshot = await db
         .collection("users")
         .where("username", "==", username)
         .get();
 
       if (snapshot.empty) {
-        console.error("No user doc found for username:", username);
         return res
           .status(404)
           .json({ success: false, error: "User not found in Firestore." });
       }
 
-      // Assuming username is unique, take the first doc
       userDocId = snapshot.docs[0].id;
-      console.log("Found user doc by username. Doc ID:", userDocId);
     }
 
-    // 3) Set onboardingComplete = true on the user doc
-    //    If doc doesn't exist, this throws an error => handled by catch()
+    // Mark onboardingComplete
     await db.collection("users").doc(userDocId).update({
       onboardingComplete: true,
     });
-    console.log(`Updated user doc ${userDocId} => onboardingComplete: true`);
 
-    // 4) Optionally store the full form data in its own collection, e.g. "learnerPersonas"
+    // Create a record in "learnerPersonas"
     const newDocRef = await db.collection("learnerPersonas").add({
       userId: userDocId,
       category,
       answers,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
-    console.log("Created new doc in learnerPersonas:", newDocRef.id);
 
-    // 5) Return success to the frontend
     return res.status(200).json({
       success: true,
       message: "User onboarding complete and form data stored.",
