@@ -884,6 +884,166 @@ exports.createSubChaptersDemoOnCreate = onDocumentCreated(
 );
 
 
+
+
+exports.repurposeSubChapterWithContext = onDocumentUpdated("pdfSubChapters/{subChapterId}", async (event) => {
+  try {
+    const beforeData = event.data.before?.data() || {};
+    const afterData = event.data.after?.data() || {};
+
+    // If `fullText` hasn't changed, skip
+    const oldText = beforeData.fullText || "";
+    const newText = afterData.fullText || "";
+    if (!newText || newText === oldText) {
+      logger.info("No new/updated `fullText` to process. Skipping repurposeSubChapterWithContext.");
+      return;
+    }
+
+    const subChapterId = event.params.subChapterId;
+
+    // (A) Read subChapter info: pdfChapterId, startMarker, endMarker
+    const { pdfChapterId, startMarker, endMarker } = afterData;
+    if (!pdfChapterId || typeof startMarker !== "number" || typeof endMarker !== "number") {
+      logger.warn(`Missing or invalid pdfChapterId/startMarker/endMarker in doc ${subChapterId}.`);
+      return;
+    }
+
+    // (B) Fetch parent pdfChapters doc to find pdfDocId
+    const db = admin.firestore();
+    const chapterRef = db.collection("pdfChapters").doc(pdfChapterId);
+    const chapterSnap = await chapterRef.get();
+    if (!chapterSnap.exists) {
+      logger.warn(`No pdfChapters doc found for docId=${pdfChapterId}. Cannot proceed.`);
+      return;
+    }
+    const chapterData = chapterSnap.data() || {};
+    const pdfDocId = chapterData.pdfDocId;
+    if (!pdfDocId) {
+      logger.warn(`pdfChapter=${pdfChapterId} has no pdfDocId. Cannot query pdfPages.`);
+      return;
+    }
+
+    // (C) Identify previous & next page
+    // Example logic: if startMarker=5 => prevPage=4, nextPage=endMarker+1
+    const prevPage = startMarker > 1 ? startMarker - 1 : null;
+    const nextPage = endMarker + 1; // Could check if it doesn't exceed total page count
+
+    // (D) Fetch text from the relevant pages in `pdfPages`
+
+    // Helper function to fetch an array of pages in the range [start..end]
+    async function fetchPagesInRange(docId, start, end) {
+      const snap = await db
+        .collection("pdfPages")
+        .where("pdfDocId", "==", docId)
+        .where("pageNumber", ">=", start)
+        .where("pageNumber", "<=", end)
+        .orderBy("pageNumber", "asc")
+        .get();
+
+      if (snap.empty) return "";
+      let combined = "";
+      snap.forEach((pDoc) => {
+        const pData = pDoc.data() || {};
+        combined += `\nPage ${pData.pageNumber}:\n${pData.text}\n`;
+      });
+      return combined.trim();
+    }
+
+    // 1) Sub-chapter pages (the core content)
+    const coreText = newText.trim(); // we already have it in fullText, but you could re-fetch if you wish
+
+    // 2) Previous page
+    let prevContext = "";
+    if (prevPage) {
+      prevContext = await fetchPagesInRange(pdfDocId, prevPage, prevPage);
+    }
+
+    // 3) Next page
+    // Could check if nextPage doesn't exceed the total # of pages in pdfDoc, 
+    // but for now we'll just do it blindly:
+    let nextContext = "";
+    if (nextPage) {
+      const nextSnap = await db
+        .collection("pdfPages")
+        .where("pdfDocId", "==", pdfDocId)
+        .where("pageNumber", "==", nextPage)
+        .limit(1)
+        .get();
+      if (!nextSnap.empty) {
+        nextContext = "";
+        nextSnap.forEach((pDoc) => {
+          const pData = pDoc.data() || {};
+          nextContext += `\nPage ${pData.pageNumber}:\n${pData.text}\n`;
+        });
+      }
+    }
+
+    // (E) Build GPT prompt
+    const openAiKey = process.env.OPENAI_API_KEY;
+    if (!openAiKey) throw new Error("OPENAI_API_KEY not set!");
+    const configuration = new Configuration({ apiKey: openAiKey });
+    const openai = new OpenAIApi(configuration);
+
+    const prompt = `
+You are helping build an educational app that segments books into sub-chapters. 
+We have a sub-chapter spanning pages ${startMarker} to ${endMarker} (the "core" content). 
+We also provide the previous page and next page as context, 
+because some sentences might cross page boundaries. 
+Your job: 
+- Rewrite the sub-chapter content (pages ${startMarker}-${endMarker} only) 
+- Use the context from the previous/next pages to make transitions smooth
+  (i.e., no abrupt starts or endings).
+- Keep the approximate word count close to the original sub-chapter. 
+- Do NOT add or blend text from the previous or next page into the final sub-chapter. 
+  They are only for context to avoid cutting off sentences abruptly.
+- Remove any leftover references to page numbers or "Page X" lines.
+- Return only the updated sub-chapter text. Do not add headings or JSON.
+
+## CONTEXT
+[PREVIOUS PAGE CONTENT if any]
+${prevContext}
+
+[SUB-CHAPTER PAGES ${startMarker}..${endMarker} - original text]
+${coreText}
+
+[NEXT PAGE CONTENT if any]
+${nextContext}
+
+## INSTRUCTIONS
+Rewrite the sub-chapter content into one cohesive block, removing abrupt starts or stops. 
+Maintain the original meaning and style as closely as possible, 
+but ensure it feels like a single continuous passage in an educational text.
+`.trim();
+
+    logger.info(`Sending sub-chapter text for docId=${subChapterId} to GPT with context.`);
+
+    const completion = await openai.createChatCompletion({
+      model: "gpt-4o-mini", // or "gpt-3.5-turbo"
+      messages: [
+        { role: "system", content: "You are a helpful rewriting assistant." },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.7,
+    });
+
+    const gptOutput = completion.data.choices[0].message.content.trim() || "";
+    logger.info(`GPT repurposed subchapter length = ${gptOutput.length}`);
+
+    // (F) Store the final text in `fullTextFinal`
+    await event.data.after.ref.update({
+      fullTextFinal: gptOutput,
+      repurposeContextAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    logger.info(
+      `Wrote "fullTextFinal" to subChapter doc ${subChapterId} after integrating context from pages ${prevPage} & ${nextPage}.`
+    );
+  } catch (err) {
+    logger.error("Error in repurposeSubChapterWithContext:", err);
+  }
+});
+
+
 /**
  * 12) UPDATE Trigger: sync pdfSubChapters.fullText -> subchapters_demo.summary
  */
@@ -899,11 +1059,11 @@ exports.updateSubChaptersDemoOnUpdate = onDocumentUpdated(
       const afterData = afterSnap.data() || {};
 
       // If 'fullText' did not change, do nothing
-      if (beforeData.fullText === afterData.fullText) {
+      if (beforeData.fullTextFinal === afterData.fullTextFinal) {
         return;
       }
 
-      const newSummary = afterData.fullText || "";
+      const newSummary = afterData.fullTextFinal || "";
       const subChapterId = event.params.subChapterId;
 
       // Update subchapters_demo.{summary} = newSummary
