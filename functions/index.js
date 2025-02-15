@@ -63,6 +63,7 @@ exports.onPDFUpload = onObjectFinalized(async (event) => {
     const customMetadata = object.metadata || {};
     const category = customMetadata.category || "unspecified";
     const courseName = customMetadata.courseName || "untitled-course";
+    const userId = customMetadata.userId || "unknown-user"; // or "anonymous"
 
     const bucketName = object.bucket;
     const filePath = object.name;
@@ -142,6 +143,7 @@ exports.onPDFUpload = onObjectFinalized(async (event) => {
       text: finalText, // or omit this if you only want separate docs
       category,
       courseName,
+      userId, // store the user ID as well
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
@@ -435,6 +437,9 @@ exports.createBookDoc = onDocumentCreated("pdfExtracts/{docId}", async (event) =
 
     const data = docSnap.data() || {};
     const courseName = data.courseName || "Untitled";
+    const userId = data.userId || "Untitled";
+
+
     const categoryString = data.category || "Unspecified";
     const docId = event.params.docId;
 
@@ -460,6 +465,7 @@ exports.createBookDoc = onDocumentCreated("pdfExtracts/{docId}", async (event) =
     const newBookRef = await db.collection("books_demo").add({
       categoryId: categoryId,
       name: courseName,
+      userId: userId,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
