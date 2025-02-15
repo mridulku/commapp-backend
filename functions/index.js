@@ -3,7 +3,7 @@
  */
 
 const { onObjectFinalized } = require("firebase-functions/v2/storage");
-const { onDocumentCreated } = require("firebase-functions/v2/firestore");
+const { onDocumentCreated, onDocumentUpdated } = require("firebase-functions/v2/firestore");
 const logger = require("firebase-functions/logger");
 const admin = require("firebase-admin");
 const pdfParse = require("pdf-parse");
@@ -13,78 +13,153 @@ const path = require("path");
 const openaiPackage = require("openai");
 const Configuration = openaiPackage.Configuration;
 const OpenAIApi = openaiPackage.OpenAIApi;
-const { onDocumentUpdated } = require("firebase-functions/v2/firestore");
 
-// Manually load the cl100k_base tokenizer for GPT-3.5 / GPT-4
+// Optional token counting
 const { Tiktoken } = require("@dqbd/tiktoken");
 const cl100k = require("@dqbd/tiktoken/encoders/cl100k_base.json");
-
-logger.info(
-  "OpenAI version (from local package.json):",
-  require("./package.json").dependencies["openai"]
-);
 
 admin.initializeApp();
 const storage = new Storage();
 
 /**
  * 1) TRIGGER ON PDF UPLOAD (v2 Storage)
- *    - Parse PDF into text
- *    - Store raw text in "pdfExtracts"
+ *    - Parse PDF into text (page-wise)
+ *    - Create a doc in "pdfExtracts" with metadata
+ *    - Create separate docs in "pdfPages" for each page’s text
  */
+/**
+ * 1) TRIGGER ON PDF UPLOAD (v2 Storage)
+ *    - Parse PDF into paragraphs (using line-splitting + blank-line detection)
+ *    - Store concatenated paragraph text in "pdfExtracts"
+ */
+/**
+ * onPDFUpload
+ * -----------
+ * - Trigger: onObjectFinalized for a PDF upload in Cloud Storage
+ * - Steps:
+ *    1) Download the PDF to /tmp
+ *    2) Parse it into text
+ *    3) Convert lines → paragraphs
+ *    4) Create a doc reference in "pdfExtracts" (but do NOT write it yet!)
+ *    5) Loop over paragraphs to create docs in "pdfPages"
+ *    6) Finally, set the "pdfExtracts" doc (this triggers subsequent logic).
+ */
+
 exports.onPDFUpload = onObjectFinalized(async (event) => {
+  // These imports are typically at top-level, but shown here for clarity
+  const logger = require("firebase-functions/logger");
+  const admin = require("firebase-admin");
+  const { Storage } = require("@google-cloud/storage");
+  const fs = require("fs");
+  const path = require("path");
+  const pdf = require("pdf-parse");
+
+  // Ensure this is only done once per file
+  // e.g. if (!admin.apps.length) admin.initializeApp();
+  const storage = new Storage();
+
   try {
     const object = event.data;
-    // 1) Extract custom metadata
     const customMetadata = object.metadata || {};
-    const category = customMetadata.category || "unspecified"; // default if missing
+    const category = customMetadata.category || "unspecified";
     const courseName = customMetadata.courseName || "untitled-course";
-
 
     const bucketName = object.bucket;
     const filePath = object.name;
     const contentType = object.contentType;
 
+    // Skip if not a PDF
     if (!contentType || !contentType.includes("pdf")) {
-      logger.info("Not a PDF. Skipping.");
+      logger.info("Not a PDF. Skipping onPDFUpload.");
       return;
     }
 
     logger.info(`PDF detected at path: ${filePath}`);
 
-    // 2) Download locally
+    // 1) Download PDF to local /tmp
     const tempFilePath = path.join("/tmp", path.basename(filePath));
-    await storage.bucket(bucketName).file(filePath).download({ destination: tempFilePath });
+    await storage.bucket(bucketName).file(filePath).download({
+      destination: tempFilePath,
+    });
     logger.info(`PDF downloaded locally to ${tempFilePath}`);
 
-    // 3) Parse PDF
+    // 2) Parse PDF -> full text
     const dataBuffer = fs.readFileSync(tempFilePath);
-    const parsed = await pdfParse(dataBuffer);
-    const rawText = parsed.text;
-    logger.info(`Parsed PDF text length: ${rawText.length}`);
+    const pdfData = await pdf(dataBuffer);
+    const fullText = pdfData.text || "";
+    logger.info(`Parsed PDF text length: ${fullText.length}`);
 
-    // 4) Store in Firestore, including `category`
+    // 3) Split text into lines, then lines → paragraphs
+    const lines = fullText.split(/\r?\n/);
+    const paragraphs = [];
+    let currentPara = [];
+
+    lines.forEach((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        // Blank line => end of paragraph
+        if (currentPara.length > 0) {
+          paragraphs.push(currentPara.join(" "));
+          currentPara = [];
+        }
+      } else {
+        currentPara.push(trimmed);
+      }
+    });
+    // leftover lines
+    if (currentPara.length > 0) {
+      paragraphs.push(currentPara.join(" "));
+    }
+
+    // Optionally build a combined string of labeled paragraphs
+    // (if you want to store in pdfExtracts for reference)
+    let finalText = "<<<< Page Number>>>>>\n\n";
+    paragraphs.forEach((para, idx) => {
+      finalText += `${idx + 1}: ${para}\n\n`;
+    });
+
+    // 4) Pre-generate a doc reference for pdfExtracts (DO NOT write yet)
     const db = admin.firestore();
-    await db.collection("pdfExtracts").add({
+    const pdfExtractRef = db.collection("pdfExtracts").doc();
+    const pdfDocId = pdfExtractRef.id;
+
+    // 5) Create pdfPages docs referencing pdfDocId
+    //    One doc per paragraph (or "page"), with pageNumber and text
+    for (let i = 0; i < paragraphs.length; i++) {
+      const paraText = paragraphs[i];
+      await db.collection("pdfPages").add({
+        pdfDocId,             // link to the upcoming pdfExtracts doc
+        pageNumber: i + 1,    // or "paragraphNumber"
+        text: paraText,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+
+    // 6) Finally, set the doc in "pdfExtracts"
+    //    => This triggers any onCreate logic that expects pdfPages to be in place.
+    await pdfExtractRef.set({
       filePath,
-      text: rawText,
-      category, // Store the category from custom metadata
+      text: finalText, // or omit this if you only want separate docs
+      category,
       courseName,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    logger.info(`Stored PDF text + category="${category}" in Firestore (pdfExtracts).`);
+    logger.info(
+      `Created ${paragraphs.length} docs in "pdfPages", then wrote pdfExtracts/${pdfDocId}.`
+    );
   } catch (error) {
-    logger.error("Error in onPDFUpload:", error);
+    logger.error("Error in onPDFUpload (paragraph-based parsing):", error);
   }
 });
 
-
 /**
  * 2) TRIGGER ON DOCUMENT CREATION IN "pdfExtracts"
- *    - Insert markers into raw text, store in the same doc (markerText field)
- *    - Call GPT with markerText to produce JSON chapters
- *    - Store JSON in "pdfSummaries", referencing pdfDocId
+ *    - Fetch all pages from "pdfPages" for this pdfDocId
+ *    - Build a single string: "Page 1:\n<Text> ... Page 2:\n<Text> ..."
+ *    - Store that combined text in the same doc (pdfExtracts.markerText)
+ *    - Call GPT with the combined text, asking for chapters in terms of startPage/endPage
+ *    - Store GPT response in "pdfSummaries"
  */
 exports.addMarkersAndSummarize = onDocumentCreated("pdfExtracts/{docId}", async (event) => {
   try {
@@ -95,106 +170,77 @@ exports.addMarkersAndSummarize = onDocumentCreated("pdfExtracts/{docId}", async 
     }
 
     const data = docSnap.data() || {};
-    const text = data.text;
-    if (!text) {
-      logger.warn("Document has no 'text' field.");
+    const pdfDocId = event.params.docId;
+    const { pageCount, courseName, category } = data;
+
+    // 1) Fetch all pages from "pdfPages" for this pdfDocId
+    const db = admin.firestore();
+    const pagesSnap = await db
+      .collection("pdfPages")
+      .where("pdfDocId", "==", pdfDocId)
+      .orderBy("pageNumber", "asc")
+      .get();
+
+    if (pagesSnap.empty) {
+      logger.warn(`No pages found in pdfPages for pdfDocId=${pdfDocId}. Skipping GPT summarization.`);
       return;
     }
 
-    // Helper: Insert markers every 1000 chars
-    function insertMarkers(originalText, step = 1000) {
-      let result = "";
-      let index = 0;
-      const length = originalText.length;
+    // 2) Build the concatenated text, referencing page numbers
+    let combinedText = "";
+    pagesSnap.forEach((pDoc) => {
+      const pData = pDoc.data();
+      combinedText += `\nPage ${pData.pageNumber}:\n${pData.text}\n`;
+    });
 
-      while (index < length) {
-        const end = Math.min(index + step, length);
-        const chunk = originalText.slice(index, end);
-        result += chunk;
-        if (end < length) {
-          result += `[INDEX=${end}]`;
-        }
-        index = end;
-      }
-      return result;
-    }
-
-    // 1) Insert markers
-    const textWithMarkers = insertMarkers(text, 1000);
-
-    // 2) Store the marker-based text in the same doc
-    const db = admin.firestore();
-    const pdfExtractDocRef = db.collection("pdfExtracts").doc(event.params.docId);
+    // Store that in pdfExtracts (field = markerText, to keep naming consistent)
+    const pdfExtractDocRef = db.collection("pdfExtracts").doc(pdfDocId);
     await pdfExtractDocRef.update({
-      markerText: textWithMarkers,
+      markerText: combinedText,
       markersCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    logger.info("Stored marker-based text in the pdfExtracts doc.");
+    logger.info(`Stored combined page-based text in pdfExtracts/${pdfDocId}.`);
 
-    // 3) Call GPT with textWithMarkers
+    // 3) Call GPT
     const openAiKey = process.env.OPENAI_API_KEY;
     if (!openAiKey) {
       throw new Error("OPENAI_API_KEY is not set in environment variables!");
     }
-
     const configuration = new Configuration({ apiKey: openAiKey });
     const openai = new OpenAIApi(configuration);
 
+    // New prompt: We want startPage and endPage instead of marker indexes
     const prompt = `
-You are a structured and precise assistant. I have a large block of text with markers like [INDEX=1000], [INDEX=2000], etc. 
+You are a structured assistant. I have a text organized by page numbers. Please analyze it and divide it into top-level **chapters**, returning a JSON structure that indicates each chapter's start and end **page** (not character indexes). Follow these rules:
 
-Your task is to divide this text into well-defined **chapters** and return a structured JSON response. Follow these rules:
-
-### **Output Structure**
-- Provide a JSON object containing an array called **"chapters"**.
-- Each entry in **"chapters"** must be an object with:
-  - **"title"**: A short but descriptive title (e.g., "1. Introduction to X").
-  - **"summary"**: A concise summary of the chapter’s main theme.
-  - **"startMarker"**: The exact marker where the chapter starts.
-  - **"endMarker"**: The exact marker where the chapter ends.
-
-### **Key Constraints**
-1. The **first chapter** must start at the first available marker, and each subsequent chapter must begin at the **end marker** of the previous chapter.
-2. The **last chapter** must end at or very near the last marker of the content.
-3. Ensure a **reasonable number of chapters** that reflect the content’s logical structure.
-4. **Only return valid JSON** without any extra text, explanations, or formatting.
-
-### **Example Output**
-\`\`\`json
+**JSON Structure**:
 {
   "chapters": [
     {
-      "title": "1. Don’t Try",
-      "summary": "This chapter discusses the story of Charles Bukowski, an alcoholic and poet, whose life embodies the American Dream of perseverance. Despite years of failure, Bukowski achieved fame not by trying to be special but by embracing his failures and sharing his honest self.",
-      "startMarker": "[INDEX=1000]",
-      "endMarker": "[INDEX=6000]"
+      "title": "...",
+      "summary": "...",
+      "startPage": 1,
+      "endPage": 3
     },
-    {
-      "title": "2. Happiness Is a Problem",
-      "summary": "The narrative follows the story of a prince who grows up in a sheltered environment and later discovers the harsh realities of life. This chapter emphasizes that happiness is not something to be achieved but rather comes from solving life's problems.",
-      "startMarker": "[INDEX=34000]",
-      "endMarker": "[INDEX=48000]"
-    },
-    {
-      "title": "3. You Are Not Special",
-      "summary": "This chapter explores the dangers of entitlement and the illusion of exceptionalism in society. It critiques the self-esteem movement that has led many to believe they are special, while highlighting that adversity and failure are essential for personal growth.",
-      "startMarker": "[INDEX=62000]",
-      "endMarker": "[INDEX=90000]"
-    }
+    ...
   ]
 }
-\`\`\`
 
-### **Input**
-\`\`\`
-Text with markers:
-${textWithMarkers}
-\`\`\`
+**Requirements**:
+1. The first chapter must start at page 1.
+2. The last chapter should end at the final page.
+3. Provide a logical number of chapters that reflect the content structure.
+4. Only return valid JSON. Do not include extra commentary.
+5. Have the titles of the chapters starting with numbers 1. x, 2. xetc
+
+
+Text (with pages labeled):
+${combinedText}
 `.trim();
 
     const completion = await openai.createChatCompletion({
-      model: "gpt-4o-mini", // or your actual model
+      model: "gpt-4o-mini", // or your preferred model
       messages: [
         { role: "system", content: "You are a helpful assistant." },
         { role: "user", content: prompt },
@@ -203,16 +249,16 @@ ${textWithMarkers}
     });
 
     const gptJson = completion.data.choices[0].message.content.trim();
-    logger.info("GPT JSON output:", gptJson);
+    logger.info("GPT JSON output (chapters with page ranges):", gptJson);
 
-    // 4) Store GPT JSON in "pdfSummaries" referencing the docId
+    // 4) Store GPT JSON in "pdfSummaries"
     await db.collection("pdfSummaries").add({
-      pdfDocId: event.params.docId, // reference back to pdfExtracts
+      pdfDocId, // reference to pdfExtracts
       summary: gptJson,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    logger.info("Successfully stored JSON summary in pdfSummaries.");
+    logger.info(`Stored JSON summary in pdfSummaries for pdfDocId=${pdfDocId}.`);
   } catch (error) {
     logger.error("Error in addMarkersAndSummarize:", error);
   }
@@ -220,165 +266,123 @@ ${textWithMarkers}
 
 /**
  * 3) TRIGGER ON DOCUMENT CREATION IN "pdfSummaries"
- *    - Parse the JSON output from GPT
- *    - Fetch the *raw text* from pdfExtracts (or markerText, if you prefer)
- *    - Create "pdfChapters" sub-collection or a new top-level collection
- *      with each chapter's text
+ *    - Parse GPT's JSON, which should have an array of chapters: {title, summary, startPage, endPage}
+ *    - For each chapter:
+ *       (a) Combine the relevant pages' text from pdfPages
+ *       (b) Create doc in pdfChapters with that combined text + metadata
+ *       (c) Also create doc in chapters_demo referencing the matching book
  */
-
-/*
 exports.segmentChapters = onDocumentCreated("pdfSummaries/{summaryId}", async (event) => {
   try {
     const docSnap = event.data;
     if (!docSnap) {
-      logger.warn("No doc snapshot in segmentChapters event.");
+      logger.warn("No document snapshot found in segmentChapters event.");
       return;
     }
 
     const data = docSnap.data() || {};
     const pdfDocId = data.pdfDocId;
-    const summaryJson = data.summary; // the GPT JSON
+    const summaryJson = data.summary;
 
-    if (!pdfDocId) {
-      logger.warn("No pdfDocId found in summary doc. Cannot link back.");
-      return;
-    }
-    if (!summaryJson) {
-      logger.warn("No summary JSON found in summary doc.");
+    if (!pdfDocId || !summaryJson) {
+      logger.warn("Missing pdfDocId or summaryJson in pdfSummaries doc.");
       return;
     }
 
-    // 1) Parse the GPT JSON
-    // We might have triple backticks or something. Let's clean it up:
+    // 1) Clean and parse GPT JSON
     let cleanJson = summaryJson.replace(/^```json/, "").replace(/```$/, "").trim();
-
     let parsed;
     try {
       parsed = JSON.parse(cleanJson);
     } catch (jsonErr) {
-      logger.error("Error parsing GPT JSON:", jsonErr);
+      logger.error("Error parsing GPT JSON in segmentChapters:", jsonErr);
       return;
     }
 
-    // Expect something like { chapters: [ {title, summary, startMarker, endMarker}, ... ] }
+    // We expect { "chapters": [ { title, summary, startPage, endPage }, ... ] }
     const chapters = parsed.chapters || [];
-    logger.info("Parsed chapters length:", chapters.length);
+    logger.info(`Parsed chapters length: ${chapters.length}`);
 
-    // 2) Fetch the raw text (or the markerText) from pdfExtracts
     const db = admin.firestore();
+
+    // 2) Get the pdfExtracts doc to find courseName, etc.
     const pdfExtractDoc = await db.collection("pdfExtracts").doc(pdfDocId).get();
     if (!pdfExtractDoc.exists) {
       logger.warn(`pdfExtract doc not found for docId=${pdfDocId}`);
       return;
     }
+    const pdfExtractData = pdfExtractDoc.data() || {};
+    const courseName = pdfExtractData.courseName || "";
 
-    const extractData = pdfExtractDoc.data();
-    const rawText = extractData.text;      // or use markerText if you want
-    const markerText = extractData.markerText; // your choice
+    // 3) Find the matching book in books_demo
+    const booksSnap = await db
+      .collection("books_demo")
+      .where("name", "==", courseName)
+      .limit(1)
+      .get();
 
-    // 3) For each chapter, we can create sub-documents in a "pdfChapters" collection
-    //    We'll do a top-level "pdfChapters" for example.
-    //    If you want sub-collection, you'd do .doc(pdfDocId).collection("chapters") or similar.
-    const chaptersCollection = db.collection("pdfChapters");
+    if (booksSnap.empty) {
+      logger.warn(`No matching book in books_demo for name="${courseName}".`);
+      return;
+    }
+    const bookDoc = booksSnap.docs[0];
+    const bookId = bookDoc.id;
 
-    // Helper to locate a marker in markerText if we want the exact substring
-    // (Optional) Implementation depends on how you want to slice text.
-
-    // If we rely on the raw text, you can do your own approach to slice by approximate indexes or something else.
-
+    // 4) For each chapter, fetch pages from startPage to endPage, combine text, create docs
     for (const chapter of chapters) {
-      const { title, summary, startMarker, endMarker } = chapter;
+      const { title, summary, startPage, endPage } = chapter;
 
-      // Option A: store everything in doc without slicing text
-      // Option B: attempt to slice the raw text or the markerText using the markers
-      // We'll do a simple store of the metadata for now.
+      // (A) Fetch the pages from pdfPages that are in [startPage..endPage]
+      const pagesSnap = await db
+        .collection("pdfPages")
+        .where("pdfDocId", "==", pdfDocId)
+        .where("pageNumber", ">=", startPage)
+        .where("pageNumber", "<=", endPage)
+        .orderBy("pageNumber", "asc")
+        .get();
 
-      // Example doc
-      await chaptersCollection.add({
+      let combinedText = "";
+      pagesSnap.forEach((pDoc) => {
+        const pData = pDoc.data();
+        combinedText += `\nPage ${pData.pageNumber}:\n${pData.text}\n`;
+      });
+
+      // (B) Create doc in pdfChapters
+      const chapterRef = await db.collection("pdfChapters").add({
         pdfDocId,
         title,
         summary,
-        startMarker,
-        endMarker,
+        startPage,
+        endPage,
+        fullText: combinedText, // store the combined page text here
+        fullTextMarkers: combinedText, // store the combined page text here
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      // (C) Create doc in chapters_demo
+      const newChapterDemoRef = await db.collection("chapters_demo").add({
+        bookId,
+        name: title,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      // (D) Cross-reference
+      await chapterRef.update({
+        chapterDemoId: newChapterDemoRef.id,
       });
     }
 
-    logger.info("Chapters segmented and stored in pdfChapters collection.");
+    logger.info(`Created pdfChapters + chapters_demo docs for all ${chapters.length} chapters.`);
   } catch (error) {
     logger.error("Error in segmentChapters function:", error);
   }
 });
 
 /**
- * 4) TRIGGER ON DOCUMENT CREATION IN "pdfExtracts" (v2 Firestore)
- *    - Optional token counting remains the same
+ * 4) COUNT TOKENS (Optional)
+ *    - Trigger on creation in "pdfExtracts"
+ *    - We'll just count tokens of the combined text (markerText), or we could skip
  */
-
-
-
-
-exports.segmentChapters = onDocumentCreated("pdfSummaries/{summaryId}", async (event) => {
-  try {
-    const docSnap = event.data;
-    if (!docSnap) return;
-    const data = docSnap.data() || {};
-    const pdfDocId = data.pdfDocId;
-    const summaryJson = data.summary;
-
-    // 1) parse the GPT JSON to get chapters
-    // ... same as before
-
-    // 2) fetch pdfExtracts doc for any needed context
-    const db = admin.firestore();
-    // ... same as before
-
-    for (const chapter of chapters) {
-      const { title, summary, startMarker, endMarker } = chapter;
-
-      // (A) create pdfChapters doc
-      const chapterRef = await db.collection("pdfChapters").add({
-        pdfDocId,
-        title,
-        summary,
-        startMarker,
-        endMarker,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
-
-      // (B) also create doc in chapters_demo
-      // read courseName from pdfExtracts doc
-      const courseName = pdfExtractData.courseName;
-      const booksSnap = await db
-        .collection("books_demo")
-        .where("name", "==", courseName)
-        .limit(1)
-        .get();
-
-      if (!booksSnap.empty) {
-        const bookDoc = booksSnap.docs[0];
-        const bookId = bookDoc.id;
-
-        const newChapterDemoRef = await db.collection("chapters_demo").add({
-          bookId,
-          name: title, // or rename
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-
-        // (C) store newChapterDemoId in pdfChapters doc
-        await chapterRef.update({
-          chapterDemoId: newChapterDemoRef.id,
-        });
-      } else {
-        // no matching book => handle
-      }
-    }
-  } catch (error) {
-    logger.error("Error in segmentChapters function:", error);
-  }
-});
-
-
 exports.countTokens = onDocumentCreated("pdfExtracts/{docId}", async (event) => {
   try {
     const docSnap = event.data;
@@ -388,9 +392,10 @@ exports.countTokens = onDocumentCreated("pdfExtracts/{docId}", async (event) => 
     }
 
     const data = docSnap.data() || {};
-    const text = data.text || "";
-    if (!text) {
-      logger.warn("Document has no 'text' field.");
+    const markerText = data.markerText || ""; // we store the combined text under 'markerText'
+
+    if (!markerText) {
+      logger.warn("No 'markerText' to count tokens for.");
       return;
     }
 
@@ -400,7 +405,7 @@ exports.countTokens = onDocumentCreated("pdfExtracts/{docId}", async (event) => 
       cl100k.pat_str
     );
 
-    const tokens = encoder.encode(text);
+    const tokens = encoder.encode(markerText);
     const tokenCount = tokens.length;
     encoder.free();
 
@@ -416,84 +421,10 @@ exports.countTokens = onDocumentCreated("pdfExtracts/{docId}", async (event) => 
   }
 });
 
-
 /**
- * 5) TRIGGER ON DOCUMENT CREATION IN "pdfChapters"
- *    - Parse numeric positions from startMarker/endMarker
- *    - Fetch the markerText from pdfExtracts (since GPT offsets reference markerText)
- *    - Substring that text, remove leftover markers, store result in `fullText`
+ * 5) CREATE A BOOK DOC in "books_demo" whenever "pdfExtracts" doc is created
+ *    - This remains largely the same from your original code
  */
-exports.sliceMarkerTextForChapter = onDocumentCreated("pdfChapters/{chapterId}", async (event) => {
-  try {
-    const chapterSnap = event.data;
-    if (!chapterSnap) {
-      logger.warn("No document snapshot found in pdfChapters.");
-      return;
-    }
-
-    const chapterData = chapterSnap.data() || {};
-    const { pdfDocId, startMarker, endMarker } = chapterData;
-
-    if (!pdfDocId) {
-      logger.warn("No pdfDocId in chapter doc. Cannot reference pdfExtracts.");
-      return;
-    }
-    if (!startMarker || !endMarker) {
-      logger.warn("Missing startMarker/endMarker in chapter doc.");
-      return;
-    }
-
-    // Helper to parse e.g. "[INDEX=171000]" → 171000
-    function parseMarker(markerString) {
-      return parseInt(
-        markerString.replace("[INDEX=", "").replace("]", ""),
-        10
-      );
-    }
-
-    const startPos = parseMarker(startMarker);
-    const endPos   = parseMarker(endMarker);
-
-    // If they can't be parsed into numbers, skip
-    if (isNaN(startPos) || isNaN(endPos)) {
-      logger.warn(`Invalid markers. startMarker=${startMarker}, endMarker=${endMarker}`);
-      return;
-    }
-
-    // Fetch the pdfExtracts doc to get markerText
-    const db = admin.firestore();
-    const pdfExtractRef = db.collection("pdfExtracts").doc(pdfDocId);
-    const pdfExtractSnap = await pdfExtractRef.get();
-
-    if (!pdfExtractSnap.exists) {
-      logger.warn(`pdfExtract doc not found for docId=${pdfDocId}`);
-      return;
-    }
-
-    const extractData = pdfExtractSnap.data();
-    const markerText = extractData.markerText || "";
-    // Note: We rely on these indexes referencing markerText.
-
-    // Substring from startPos to endPos within markerText
-    const safeEnd = Math.min(endPos, markerText.length);
-    let chapterContent = markerText.substring(startPos, safeEnd);
-
-    // Remove leftover markers like "[INDEX=12345]"
-    chapterContent = chapterContent.replace(/\[INDEX=\d+\]/g, "");
-
-    // Store the final text back into the same doc in pdfChapters
-    await chapterSnap.ref.update({
-      fullText: chapterContent,
-      textCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    logger.info(`Stored fullText for chapter ${event.params.chapterId} (docId=${pdfDocId}).`);
-  } catch (error) {
-    logger.error("Error in sliceMarkerTextForChapter:", error);
-  }
-});
-
-
 exports.createBookDoc = onDocumentCreated("pdfExtracts/{docId}", async (event) => {
   try {
     const docSnap = event.data;
@@ -534,126 +465,73 @@ exports.createBookDoc = onDocumentCreated("pdfExtracts/{docId}", async (event) =
 
     logger.info(`Created books_demo doc id=${newBookRef.id}`);
 
-    // 3) Cross-reference back in pdfExtracts
+    // 3) Cross-reference in pdfExtracts
     await db.collection("pdfExtracts").doc(docId).update({
       bookDemoId: newBookRef.id,
     });
 
     logger.info(`Updated pdfExtracts/${docId} with bookDemoId=${newBookRef.id}`);
-
   } catch (error) {
     logger.error("Error in createBookDoc function:", error);
   }
 });
 
-/*
-
-exports.createChaptersDemo = onDocumentCreated("pdfChapters/{chapterId}", async (event) => {
+/**
+ * 6) sliceMarkerTextForChapter (KEEP SAME NAME)
+ *    - Previously we sliced text by character indexes. Now we already stored the combined text in pdfChapters.
+ *    - We’ll just replicate storing "fullText" if needed, or do nothing. 
+ *    - For demonstration, we'll “re-confirm” the `fullText` field if not present. 
+ */
+exports.sliceMarkerTextForChapter = onDocumentCreated("pdfChapters/{chapterId}", async (event) => {
   try {
-    const docSnap = event.data;
-    if (!docSnap) {
-      logger.info("No document snapshot in createChaptersDemo event.");
+    const chapterSnap = event.data;
+    if (!chapterSnap) {
+      logger.warn("No document snapshot found in pdfChapters.");
       return;
     }
 
-    const data = docSnap.data() || {};
-    const pdfDocId = data.pdfDocId;        // from pdfChapters doc
-    const chapterTitle = data.title || ""; // from pdfChapters doc
-
-    if (!pdfDocId) {
-      logger.info("No pdfDocId in pdfChapters doc; cannot proceed.");
+    // In the new page-based approach, we already store combined text in 'fullText'.
+    // We'll just confirm it or do minimal reprocessing.
+    const chapterData = chapterSnap.data() || {};
+    const existingFullText = chapterData.fullText || "";
+    if (!existingFullText) {
+      logger.info("No 'fullText' found. There's nothing to slice in page-based logic.");
       return;
     }
 
-    // 1) Fetch the pdfExtracts doc using pdfDocId
-    const db = admin.firestore();
-    const pdfExtractRef = db.collection("pdfExtracts").doc(pdfDocId);
-    const pdfExtractSnap = await pdfExtractRef.get();
-    if (!pdfExtractSnap.exists) {
-      logger.info(`pdfExtract doc not found for docId=${pdfDocId}.`);
-      return;
-    }
-
-    const pdfExtractData = pdfExtractSnap.data() || {};
-    const courseName = pdfExtractData.courseName; // e.g. "fun", "Chemistry 101", etc.
-
-    if (!courseName) {
-      logger.info("No courseName in pdfExtracts doc. Unable to link to books_demo.");
-      return;
-    }
-
-    logger.info(
-      `Creating chapters_demo entry for chapter title="${chapterTitle}", pdfDocId=${pdfDocId}, courseName="${courseName}"`
-    );
-
-    // 2) Find the doc in books_demo whose name == courseName
-    const booksSnap = await db
-      .collection("books_demo")
-      .where("name", "==", courseName)
-      .limit(1)
-      .get();
-
-    if (booksSnap.empty) {
-      logger.info(`No matching book in books_demo for name="${courseName}".`);
-      return;
-    }
-
-    // We have a matching book doc
-    const bookDoc = booksSnap.docs[0];
-    const bookId = bookDoc.id;
-
-    logger.info(`Matched book: id=${bookId}, name="${courseName}"`);
-
-    // 3) Create doc in chapters_demo => store new doc's ID
-    const newChapterRef = await db.collection("chapters_demo").add({
-      bookId,
-      name: chapterTitle,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    logger.info(
-      `Successfully created chapters_demo doc referencing bookId=${bookId}, name="${chapterTitle}".`
-    );
-
-    // 4) Store the newly created chapterDemoId back in pdfChapters
-    await docSnap.ref.update({
-      chapterDemoId: newChapterRef.id,
-    });
-    logger.info(
-      `Stored chapterDemoId=${newChapterRef.id} back into pdfChapters doc ${event.params.chapterId}`
-    );
-
+    // If you needed to do something else, you could. 
+    // For now, we’ll just log that we have the text.
+    logger.info(`pdfChapters/${event.params.chapterId} => fullText length=${existingFullText.length}`);
   } catch (error) {
-    logger.error("Error in createChaptersDemo function:", error);
+    logger.error("Error in sliceMarkerTextForChapter:", error);
   }
 });
 
-*/
-
-
+/**
+ * 7) addMarkersToFullText 
+ *    - In the old code, we inserted [INDEX=###]. 
+ *    - If we still want to do some marker-based chunking for sub-chapters, we can. 
+ *    - Or we can skip. Let's keep a minimal approach: we add some dummy markers every 500 chars, as example.
+ */
 exports.addMarkersToFullText = onDocumentUpdated("pdfChapters/{chapterId}", async (event) => {
   try {
     const beforeData = event.data.before?.data() || {};
     const afterData = event.data.after?.data() || {};
 
-    // 1) Extract old/new fullText fields
-    const oldFullText = beforeData.fullText || null;
-    const newFullText = afterData.fullText || null;
+    const oldFullText = beforeData.fullText || "";
+    const newFullText = afterData.fullText || "";
 
     // If no newFullText or it's unchanged, skip
-    if (!newFullText) {
-      logger.info("No new or updated 'fullText' in pdfChapters doc. Skipping marker insertion.");
-      return;
-    }
-    if (newFullText === oldFullText) {
-      logger.info("fullText unchanged. Skipping marker insertion.");
+    if (!newFullText || oldFullText === newFullText) {
+      logger.info("No updated fullText to mark up. Skipping.");
       return;
     }
 
-    logger.info(`Detected updated fullText for doc ${event.params.chapterId}. Inserting markers...`);
+    logger.info(`Detected updated fullText in pdfChapters/${event.params.chapterId}. Inserting markers...`);
 
-    // 2) Insert markers
-    function insertMarkers(originalText, step = 100) {
+    // Insert artificial markers (like [INDEX=500]) every 500 chars 
+    // (You can skip or adapt as needed.)
+    function insertMarkers(originalText, step = 500) {
       let result = "";
       let index = 0;
       const length = originalText.length;
@@ -670,10 +548,9 @@ exports.addMarkersToFullText = onDocumentUpdated("pdfChapters/{chapterId}", asyn
       return result;
     }
 
-    // Example: step=500 to place markers more frequently
     const markedText = insertMarkers(newFullText, 500);
 
-    // 3) Store the marker-based text in 'fullTextMarkers'
+    // Update the doc with fullTextMarkers
     const db = admin.firestore();
     await db
       .collection("pdfChapters")
@@ -683,102 +560,79 @@ exports.addMarkersToFullText = onDocumentUpdated("pdfChapters/{chapterId}", asyn
         markersCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
-    logger.info(
-      `Successfully inserted markers into 'fullText' for doc=${event.params.chapterId}, updated 'fullTextMarkers'.`
-    );
-
+    logger.info(`Inserted markers into pdfChapters/${event.params.chapterId} -> fullTextMarkers.`);
   } catch (error) {
     logger.error("Error in addMarkersToFullText function:", error);
   }
 });
 
+/**
+ * 8) summarizeFullTextMarkers
+ *    - If we want to chunk sub-chapters, we can pass the newly marked text to GPT for sub-chapter breakdown.
+ *    - We'll keep the same logic of storing the GPT response in pdfSubSummaries, referencing pdfChapterId.
+ * 
+ * 
+ * 
+ * 
+ 
+ */
 
-
-exports.summarizeFullTextMarkers = onDocumentUpdated("pdfChapters/{chapterId}", async (event) => {
+exports.summarizeFullTextMarkers = onDocumentCreated("pdfChapters/{chapterId}", async (event) => {
   try {
-    const beforeData = event.data.before?.data() || {};
-    const afterData = event.data.after?.data() || {};
+    const docSnap = event.data;
+    if (!docSnap) return;
+    const data = docSnap.data() || {};
 
-    // 1) Check if fullTextMarkers was newly created or changed
-    const oldMarkers = beforeData.fullTextMarkers;
-    const newMarkers = afterData.fullTextMarkers;
+    const pdfChapterId = event.params.chapterId;
+    const markers = data.fullTextMarkers || "";
 
-    // If no newMarkers or it's unchanged, skip
-    if (!newMarkers) {
-      logger.info("No new 'fullTextMarkers' in pdfChapters doc. Skipping GPT summarization.");
-      return;
-    }
-    if (oldMarkers === newMarkers) {
-      logger.info("fullTextMarkers unchanged. Skipping GPT summarization.");
+    // If no markers, skip
+    if (!markers) {
+      console.log("No fullTextMarkers on creation. Skipping summarizeFullTextMarkers.");
       return;
     }
 
-    // 2) Summarize newMarkers with GPT
-    logger.info(`New/updated fullTextMarkers for docId=${event.params.chapterId}. Summarizing...`);
+    console.log(`New doc created in pdfChapters/${pdfChapterId} with fullTextMarkers. Summarizing...`);
 
+    // 1) Call GPT
     const openAiKey = process.env.OPENAI_API_KEY;
-    if (!openAiKey) {
-      throw new Error("OPENAI_API_KEY is not set in environment variables!");
-    }
-
+    if (!openAiKey) throw new Error("OPENAI_API_KEY is not set!");
     const configuration = new Configuration({ apiKey: openAiKey });
     const openai = new OpenAIApi(configuration);
 
-    // Similar to your existing prompt for chunking into chapters, adapt as needed
     const prompt = `
-    You are a structured and precise assistant. I have a block of text with markers like [INDEX=1000], [INDEX=2000], etc. 
-    
-    Your task is to divide this text into **5-6 well-structured sub-chapters** and return a JSON response. Follow these rules:
-    
-    ### **Output Structure**
-    - Provide a JSON object containing an array called **"subChapters"**.
-    - Each entry in **"subChapters"** must be an object with:
-      - **"title"**: A short but descriptive title (e.g., "1. Overview of X").
-      - **"summary"**: A concise summary of the sub-chapter’s main theme.
-      - **"startMarker"**: The exact marker where the sub-chapter starts.
-      - **"endMarker"**: The exact marker where the sub-chapter ends.
-    
-    ### **Key Constraints**
-    1. The **first sub-chapter** must start at the first available marker, and each subsequent sub-chapter must begin at the **end marker** of the previous one.
-    2. The **last sub-chapter** must end at or very near the last marker of the content.
-    3. Ensure **5-6 meaningful sub-chapters**, evenly distributing content logically.
-    4. **Only return valid JSON** without any extra text, explanations, or formatting.
-    
-    ### **Example Output**
-    \`\`\`json
+
+
+You are a structured assistant. I have a text organized by page numbers. Please analyze it and divide it into a reasonable number of suchapters returning a JSON structure that indicates each chapter's start and end **page** (not character indexes). Follow these rules:
+
+**JSON Structure**:
+{
+  "subChapters": [
     {
-      "subChapters": [
-        {
-          "title": "1. The Paradox of Bukowski",
-          "summary": "An introduction to Charles Bukowski's life, highlighting his failures and struggles as a writer.",
-          "startMarker": "[INDEX=500]",
-          "endMarker": "[INDEX=1000]"
-        },
-        {
-          "title": "2. The Rise of a Misfit",
-          "summary": "This section explores how Bukowski’s failures shaped his writing style, making him a cult icon.",
-          "startMarker": "[INDEX=1000]",
-          "endMarker": "[INDEX=2000]"
-        },
-        {
-          "title": "3. A Life Without Pretense",
-          "summary": "Bukowski’s unfiltered approach to life and writing, and how his honesty resonated with millions.",
-          "startMarker": "[INDEX=2000]",
-          "endMarker": "[INDEX=3500]"
-        }
-      ]
-    }
-    \`\`\`
-    
-    ### **Input**
-    \`\`\`
-    Text with markers:
-    ${newMarkers}
-    \`\`\`
-    `.trim();
+      "title": "...",
+      "summary": "...",
+      "startMarker": 1,
+      "endMarker": 3
+    },
+    ...
+  ]
+}
+
+**Requirements**:
+1. The first subchapter must start at the first page number mentioned.
+2. The last chapter should end at the final page mentioned in the text.
+3. Provide a logical number of chapters that reflect the content structure.
+4. Only return valid JSON. Do not include extra commentary.
+5. Have the titles of the subchapters starting with numbers 1. x, 2. xetc
+
+
+
+
+${markers}
+`.trim();
 
     const completion = await openai.createChatCompletion({
-      model: "gpt-4o-mini", // or whichever model suits your needs
+      model: "gpt-4o-mini",
       messages: [
         { role: "system", content: "You are a helpful assistant." },
         { role: "user", content: prompt },
@@ -787,27 +641,29 @@ exports.summarizeFullTextMarkers = onDocumentUpdated("pdfChapters/{chapterId}", 
     });
 
     const gptJson = completion.data.choices[0].message.content.trim();
-    logger.info("GPT sub-chapters JSON output:", gptJson);
+    console.log("GPT sub-chapters JSON output:", gptJson);
 
-    // 3) Store GPT JSON in pdfSubSummaries referencing this pdfChapters doc
+    // 2) Store in pdfSubSummaries
     const db = admin.firestore();
     await db.collection("pdfSubSummaries").add({
-      pdfChapterId: event.params.chapterId,
-      subChaptersJson: gptJson, // store the raw JSON (or parse it, your choice)
+      pdfChapterId,
+      subChaptersJson: gptJson,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    logger.info(
-      `Stored GPT sub-chapters JSON in pdfSubSummaries for chapterId=${event.params.chapterId}.`
-    );
-
+    console.log(`Stored GPT sub-chapters JSON in pdfSubSummaries for chapterId=${pdfChapterId}.`);
   } catch (error) {
-    logger.error("Error in summarizeFullTextMarkers function:", error);
+    console.error("Error in summarizeFullTextMarkersOnCreate function:", error);
   }
 });
 
 
 
+/**
+ * 9) segmentSubChapters
+ *    - On creation in pdfSubSummaries
+ *    - Parse GPT's JSON, create docs in pdfSubChapters
+ */
 exports.segmentSubChapters = onDocumentCreated("pdfSubSummaries/{subSummaryId}", async (event) => {
   try {
     const docSnap = event.data;
@@ -817,22 +673,15 @@ exports.segmentSubChapters = onDocumentCreated("pdfSubSummaries/{subSummaryId}",
     }
 
     const data = docSnap.data() || {};
-    const pdfChapterId = data.pdfChapterId;   // references the parent doc in pdfChapters
-    const subChaptersJson = data.subChaptersJson;  // the GPT JSON
+    const pdfChapterId = data.pdfChapterId;
+    const subChaptersJson = data.subChaptersJson;
 
-    if (!pdfChapterId) {
-      logger.warn("No pdfChapterId found in pdfSubSummaries doc. Cannot link back to pdfChapters.");
-      return;
-    }
-    if (!subChaptersJson) {
-      logger.warn("No subChaptersJson found in pdfSubSummaries doc.");
+    if (!pdfChapterId || !subChaptersJson) {
+      logger.warn("Missing pdfChapterId or subChaptersJson in pdfSubSummaries doc.");
       return;
     }
 
-    // 1) Parse the GPT sub-chapters JSON
-    // It might have backticks or extra formatting
     let cleanJson = subChaptersJson.replace(/^```json/, "").replace(/```$/, "").trim();
-
     let parsed;
     try {
       parsed = JSON.parse(cleanJson);
@@ -841,31 +690,15 @@ exports.segmentSubChapters = onDocumentCreated("pdfSubSummaries/{subSummaryId}",
       return;
     }
 
-    // Expect: { "subChapters": [ { title, summary, startMarker, endMarker }, ... ] }
     const subChaptersArr = parsed.subChapters || [];
     logger.info(`Parsed ${subChaptersArr.length} sub-chapters from GPT JSON.`);
 
     const db = admin.firestore();
 
-    // Optional: If you want the markerText from pdfChapters to do substring slicing,
-    // you can fetch the doc here:
-    // const chapterDoc = await db.collection("pdfChapters").doc(pdfChapterId).get();
-    // if (!chapterDoc.exists) {
-    //   logger.warn(`pdfChapter doc not found for docId=${pdfChapterId}`);
-    //   return;
-    // }
-    // const chapterData = chapterDoc.data() || {};
-    // const fullTextMarkers = chapterData.fullTextMarkers; // you could slice if needed.
-
-    // 2) Create docs in "pdfSubChapters"
-    // For each sub-chapter from GPT, store metadata: pdfChapterId, title, summary, startMarker, endMarker
-    const subChaptersCollection = db.collection("pdfSubChapters");
-
     for (const subChapter of subChaptersArr) {
       const { title, summary, startMarker, endMarker } = subChapter;
 
-      // Create doc in "pdfSubChapters"
-      await subChaptersCollection.add({
+      await db.collection("pdfSubChapters").add({
         pdfChapterId,
         title: title || "Untitled Sub-chapter",
         summary: summary || "",
@@ -874,7 +707,7 @@ exports.segmentSubChapters = onDocumentCreated("pdfSubSummaries/{subSummaryId}",
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
-      logger.info(`Created sub-chapter doc for title="${title}" referencing pdfChapterId=${pdfChapterId}.`);
+      logger.info(`Created pdfSubChapters doc for sub-chapter="${title}" (pdfChapterId=${pdfChapterId}).`);
     }
 
     logger.info(`Successfully stored ${subChaptersArr.length} sub-chapters in pdfSubChapters.`);
@@ -883,267 +716,189 @@ exports.segmentSubChapters = onDocumentCreated("pdfSubSummaries/{subSummaryId}",
   }
 });
 
-
-
-exports.segmentChapters = onDocumentCreated("pdfSummaries/{summaryId}", async (event) => {
-  try {
-    const docSnap = event.data;
-    if (!docSnap) {
-      logger.warn("No document snapshot found in segmentChapters event.");
-      return;
-    }
-
-    // Extract fields from the newly created pdfSummaries doc
-    const data = docSnap.data() || {};
-    const pdfDocId = data.pdfDocId;       // reference to pdfExtracts doc
-    const summaryJson = data.summary;     // GPT's JSON output
-
-    if (!pdfDocId || !summaryJson) {
-      logger.warn("Missing pdfDocId or summaryJson in pdfSummaries doc.");
-      return;
-    }
-
-    // 1) Clean up any triple backticks, parse the JSON
-    let cleanJson = summaryJson
-      .replace(/^```json/, "")
-      .replace(/```$/, "")
-      .trim();
-
-    let parsed;
-    try {
-      parsed = JSON.parse(cleanJson);
-    } catch (jsonErr) {
-      logger.error("Error parsing GPT JSON in segmentChapters:", jsonErr);
-      return;
-    }
-
-    // We expect { chapters: [ { title, summary, startMarker, endMarker }, ... ] }
-    const chapters = parsed.chapters || [];
-    logger.info(`Parsed chapters length: ${chapters.length}`);
-
-    // 2) Fetch the pdfExtracts doc to get courseName, etc.
-    const db = admin.firestore();
-    const pdfExtractDoc = await db.collection("pdfExtracts").doc(pdfDocId).get();
-    if (!pdfExtractDoc.exists) {
-      logger.warn(`pdfExtract doc not found for docId=${pdfDocId} in segmentChapters.`);
-      return;
-    }
-
-    const pdfExtractData = pdfExtractDoc.data() || {};
-    const courseName = pdfExtractData.courseName || null;
-    if (!courseName) {
-      logger.warn("No courseName in pdfExtracts doc. Can't link to books_demo in segmentChapters.");
-      return;
-    }
-
-    // Query the matching book in books_demo
-    const booksSnap = await db
-      .collection("books_demo")
-      .where("name", "==", courseName)
-      .limit(1)
-      .get();
-
-    if (booksSnap.empty) {
-      logger.warn(`No matching book in books_demo for name="${courseName}".`);
-      return;
-    }
-    const bookDoc = booksSnap.docs[0];
-    const bookId = bookDoc.id;
-
-    // 3) For each chapter, create a pdfChapters doc *and* a corresponding chapters_demo doc
-    for (const chapter of chapters) {
-      const { title, summary, startMarker, endMarker } = chapter;
-
-      // (A) Create the pdfChapters doc
-      const chapterRef = await db.collection("pdfChapters").add({
-        pdfDocId,
-        title,
-        summary,
-        startMarker,
-        endMarker,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
-
-      // (B) Create the user-facing chapters_demo doc
-      const newChapterDemoRef = await db.collection("chapters_demo").add({
-        bookId,
-        name: title, // The user-facing name of this chapter
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
-
-      // (C) Cross-reference back in pdfChapters (store chapterDemoId)
-      await chapterRef.update({
-        chapterDemoId: newChapterDemoRef.id,
-      });
-    }
-
-    logger.info(
-      `segmentChapters: Created pdfChapters + chapters_demo docs for all ${chapters.length} chapters.`
-    );
-  } catch (error) {
-    logger.error("Error in segmentChapters function:", error);
-  }
-});
-
-
-exports.sliceMarkerTextForSubchapter = onDocumentCreated("pdfSubChapters/{subChapterId}", async (event) => {
-  try {
-    const subChapterSnap = event.data;
-    if (!subChapterSnap) {
-      logger.warn("No document snapshot for newly created pdfSubChapters doc.");
-      return;
-    }
-
-    const subChapterData = subChapterSnap.data() || {};
-    const { pdfChapterId, startMarker, endMarker } = subChapterData;
-
-    if (!pdfChapterId) {
-      logger.warn("No pdfChapterId in sub-chapter doc. Cannot reference pdfChapters.");
-      return;
-    }
-    if (!startMarker || !endMarker) {
-      logger.warn("Missing startMarker/endMarker in sub-chapter doc.");
-      return;
-    }
-
-    // Helper to parse e.g. "[INDEX=171000]" → 171000
-    function parseMarker(markerString) {
-      return parseInt(
-        markerString.replace("[INDEX=", "").replace("]", ""),
-        10
-      );
-    }
-
-    const startPos = parseMarker(startMarker);
-    const endPos   = parseMarker(endMarker);
-
-    // If markers aren't valid numbers, skip
-    if (isNaN(startPos) || isNaN(endPos)) {
-      logger.warn(`Invalid markers. startMarker=${startMarker}, endMarker=${endMarker}`);
-      return;
-    }
-
-    // 1) Fetch the doc in `pdfChapters` to get `fullTextMarkers`
-    const db = admin.firestore();
-    const chapterRef = db.collection("pdfChapters").doc(pdfChapterId);
-    const chapterSnap = await chapterRef.get();
-
-    if (!chapterSnap.exists) {
-      logger.warn(`pdfChapters doc not found for docId=${pdfChapterId}`);
-      return;
-    }
-
-    const chapterData = chapterSnap.data() || {};
-    const fullTextMarkers = chapterData.fullTextMarkers || "";
-
-    if (!fullTextMarkers) {
-      logger.warn(
-        `No 'fullTextMarkers' found in pdfChapters/${pdfChapterId}. Cannot slice sub-chapter text.`
-      );
-      return;
-    }
-
-    // 2) Substring from startPos..endPos in fullTextMarkers
-    const safeEnd = Math.min(endPos, fullTextMarkers.length);
-    let subChapterContent = fullTextMarkers.substring(startPos, safeEnd);
-
-    // Remove leftover markers like [INDEX=12345]
-    subChapterContent = subChapterContent.replace(/\[INDEX=\d+\]/g, "");
-
-    // 3) Store the final text in this sub-chapter doc
-    await subChapterSnap.ref.update({
-      fullText: subChapterContent,
-      textCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    logger.info(
-      `Successfully stored 'fullText' for sub-chapter ${event.params.subChapterId} (pdfChapterId=${pdfChapterId}).`
-    );
-  } catch (error) {
-    logger.error("Error in sliceMarkerTextForSubchapter:", error);
-  }
-});
-
-
+/**
+ * (NOTE) We re-declare `segmentChapters` at the bottom of your original code, but we've already replaced 
+ *        that logic above. Make sure there's no duplication. If you see a duplication error, remove it.
+ *        We'll keep just one definition named "segmentChapters".
+ */
 
 /**
- * 1) CREATE Trigger: Fires when a doc is created in `pdfSubChapters/{subChapterId}`.
- *    - Reads the parent `pdfChapters` doc to get `chapterDemoId`.
- *    - Creates a corresponding doc in `subchapters_demo/{subChapterId}`.
+ * 10) sliceMarkerTextForSubchapter
+ *     - In the old code, we used [INDEX=###] to slice from the big markerText. 
+ *       Now we do something similar if we want to get the actual text for each sub-chapter.
+ */
+/**
+ * sliceMarkerTextForSubchapter (page-based)
+ * -----------------------------------------
+ * Trigger: onDocumentCreated("pdfSubChapters/{subChapterId}")
+ * Goal:    Fetch the parent chapter doc → get pdfDocId → query pdfPages
+ *          from startPage..endPage and combine them into .fullText
+ */
+/**
+ * sliceMarkerTextForSubchapter
+ * ----------------------------
+ * Trigger: onDocumentCreated("pdfSubChapters/{subChapterId}")
+ * 
+ * 1) We read `pdfChapterId`, `startMarker`, `endMarker` from the new doc.
+ * 2) We fetch the parent chapter doc (pdfChapters/{pdfChapterId}) to get pdfDocId (link to pdfPages).
+ * 3) We do a range query on pdfPages using `>= startMarker` and `<= endMarker`.
+ * 4) We combine all those pages' text into `fullText`.
+ * 5) We store `fullText` in the new `pdfSubChapters` doc so that 
+ *    subsequent steps can push it to `subchapters_demo`.
+ */
+
+exports.sliceMarkerTextForSubchapter = onDocumentCreated(
+  "pdfSubChapters/{subChapterId}",
+  async (event) => {
+    try {
+      const subChapterSnap = event.data;
+      if (!subChapterSnap) {
+        console.warn("No document snapshot for newly created pdfSubChapters doc.");
+        return;
+      }
+
+      const subChapterData = subChapterSnap.data() || {};
+      const { pdfChapterId, startMarker, endMarker } = subChapterData;
+
+      // 1) Validate required fields
+      if (!pdfChapterId) {
+        console.warn("No pdfChapterId in sub-chapter doc. Cannot reference pdfChapters.");
+        return;
+      }
+      if (typeof startMarker !== "number" || typeof endMarker !== "number") {
+        console.warn(
+          `startMarker/endMarker must be numeric. startMarker=${startMarker}, endMarker=${endMarker}`
+        );
+        return;
+      }
+
+      // 2) Fetch the parent pdfChapters doc to get pdfDocId
+      const db = admin.firestore();
+      const chapterRef = db.collection("pdfChapters").doc(pdfChapterId);
+      const chapterSnap = await chapterRef.get();
+      if (!chapterSnap.exists) {
+        console.warn(`pdfChapters doc not found for docId=${pdfChapterId}`);
+        return;
+      }
+
+      const chapterData = chapterSnap.data() || {};
+      const pdfDocId = chapterData.pdfDocId;
+      if (!pdfDocId) {
+        console.warn(
+          `No pdfDocId in pdfChapters/${pdfChapterId}. Cannot query pdfPages.`
+        );
+        return;
+      }
+
+      // 3) Query pdfPages for pages in [startMarker..endMarker]
+      const pagesSnap = await db
+        .collection("pdfPages")
+        .where("pdfDocId", "==", pdfDocId)
+        .where("pageNumber", ">=", startMarker)
+        .where("pageNumber", "<=", endMarker)
+        .orderBy("pageNumber", "asc")
+        .get();
+
+      if (pagesSnap.empty) {
+        console.warn(
+          `No pages found in pdfPages for pdfDocId=${pdfDocId} in range ${startMarker}-${endMarker}.`
+        );
+        return;
+      }
+
+      // 4) Combine text from all pages
+      let combinedText = "";
+      pagesSnap.forEach((pageDoc) => {
+        const pData = pageDoc.data() || {};
+        combinedText += `\nPage ${pData.pageNumber}:\n${pData.text}\n`;
+      });
+
+      // 5) Store combined text in the sub-chapter doc
+      await subChapterSnap.ref.update({
+        fullText: combinedText,
+        textCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      console.log(
+        `Stored fullText for sub-chapter=${event.params.subChapterId}, pdfDocId=${pdfDocId}, pages=[${startMarker}..${endMarker}].`
+      );
+    } catch (error) {
+      console.error("Error in sliceMarkerTextForSubchapter:", error);
+    }
+  }
+);
+
+/**
+ * 11) CREATE Trigger: subChapters -> subchapters_demo
+ *     - When a doc is created in pdfSubChapters, we also create one in subchapters_demo 
+ *       linked to the parent chapter’s "chapterDemoId".
  */
 exports.createSubChaptersDemoOnCreate = onDocumentCreated(
   "pdfSubChapters/{subChapterId}",
   async (event) => {
     try {
-      // `event.data` is the newly created doc snapshot.
       const docSnap = event.data;
       if (!docSnap) return;
 
-      const subChapterId = event.params.subChapterId; // from {subChapterId}
+      const subChapterId = event.params.subChapterId;
       const data = docSnap.data() || {};
 
       const pdfChapterId = data.pdfChapterId;
       const subTitle = data.title || "";
-      const subSummary = data.fullText || ""; // might be empty if summary is generated later
 
       if (!pdfChapterId) {
-        logger.info("No pdfChapterId found in new doc — skipping creation in subchapters_demo.");
+        console.info("No pdfChapterId found in new doc — skipping creation in subchapters_demo.");
         return;
       }
 
-      // Fetch the parent pdfChapters doc to get `chapterDemoId`
-      const chapterRef = admin.firestore().collection("pdfChapters").doc(pdfChapterId);
+      // Fetch parent pdfChapters doc to get chapterDemoId
+      const db = admin.firestore();
+      const chapterRef = db.collection("pdfChapters").doc(pdfChapterId);
       const chapterSnap = await chapterRef.get();
       if (!chapterSnap.exists) {
-        logger.info(`No pdfChapters doc found for ID: ${pdfChapterId}.`);
+        console.info(`No pdfChapters doc found for ID: ${pdfChapterId}.`);
         return;
       }
 
       const chapterData = chapterSnap.data() || {};
       const chapterDemoId = chapterData.chapterDemoId;
       if (!chapterDemoId) {
-        logger.info("No chapterDemoId found in pdfChapters doc. Skipping creation in subchapters_demo.");
+        console.info("No chapterDemoId found in pdfChapters doc. Skipping creation in subchapters_demo.");
         return;
       }
 
-      // Create a doc in `subchapters_demo` with the SAME doc ID as subChapterId for easy lookups
-      await admin.firestore().collection("subchapters_demo").doc(subChapterId).set({
-        subChapterId, // store it so we can easily reference it if needed
-        chapterId: chapterDemoId,   // link to the "chapters_demo"
+      // Create in subchapters_demo with same doc ID (optional)
+      await db.collection("subchapters_demo").doc(subChapterId).set({
+        subChapterId,
+        chapterId: chapterDemoId,
         name: subTitle,
-        summary: subSummary,
+        summary: "", // will be filled when we slice + update
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
-      logger.info(`Created subchapters_demo/${subChapterId} successfully.`);
+      console.log(`Created subchapters_demo/${subChapterId} successfully.`);
     } catch (error) {
-      logger.error("Error in createSubChaptersDemoOnCreate:", error);
+      console.error("Error in createSubChaptersDemoOnCreate:", error);
     }
   }
 );
 
+
 /**
- * 2) UPDATE Trigger: Fires whenever a doc in `pdfSubChapters/{subChapterId}` changes.
- *    - Checks if `fullText` changed between `before` and `after`.
- *    - If changed, updates the matching doc in `subchapters_demo/{subChapterId}`.
+ * 12) UPDATE Trigger: sync pdfSubChapters.fullText -> subchapters_demo.summary
  */
 exports.updateSubChaptersDemoOnUpdate = onDocumentUpdated(
   "pdfSubChapters/{subChapterId}",
   async (event) => {
     try {
-      // In v2, event.data.before and event.data.after are DocumentSnapshots for the old/new versions
       const beforeSnap = event.data.before;
       const afterSnap = event.data.after;
-
-      if (!beforeSnap.exists || !afterSnap.exists) {
-        // If the doc was deleted or somehow missing, do nothing
-        return;
-      }
+      if (!beforeSnap.exists || !afterSnap.exists) return;
 
       const beforeData = beforeSnap.data() || {};
       const afterData = afterSnap.data() || {};
 
-      // Only update if `fullText` actually changed
+      // If 'fullText' did not change, do nothing
       if (beforeData.fullText === afterData.fullText) {
         return;
       }
@@ -1151,17 +906,16 @@ exports.updateSubChaptersDemoOnUpdate = onDocumentUpdated(
       const newSummary = afterData.fullText || "";
       const subChapterId = event.params.subChapterId;
 
-      // Update the subchapters_demo doc that shares the same ID
-      const subDemoRef = admin.firestore().collection("subchapters_demo").doc(subChapterId);
+      // Update subchapters_demo.{summary} = newSummary
+      const db = admin.firestore();
+      const subDemoRef = db.collection("subchapters_demo").doc(subChapterId);
       await subDemoRef.update({
         summary: newSummary,
       });
 
-      logger.info(`Updated subchapters_demo/${subChapterId} with new summary.`);
+      console.log(`Updated subchapters_demo/${subChapterId} with new summary text.`);
     } catch (error) {
-      logger.error("Error in updateSubChaptersDemoOnUpdate:", error);
+      console.error("Error in updateSubChaptersDemoOnUpdate:", error);
     }
   }
 );
-
-// You can define other v2 triggers (e.g., onObjectFinalized for Storage) below...
