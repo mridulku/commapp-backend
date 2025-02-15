@@ -1139,16 +1139,26 @@ app.get("/api/categories", async (req, res) => {
 */
 app.get("/api/books", async (req, res) => {
   try {
-    const { categoryId } = req.query;
+    // Extract categoryId and userId from query params
+    const { categoryId, userId } = req.query;
 
-    // 1) Fetch books (optionally filtered by categoryId)
+    // 1) Build a query referencing "books_demo"
     let booksRef = db.collection("books_demo");
+
+    // Filter by category if provided
     if (categoryId) {
       booksRef = booksRef.where("categoryId", "==", categoryId);
     }
+
+    // Filter by userId if provided
+    if (userId) {
+      booksRef = booksRef.where("userId", "==", userId);
+    }
+
+    // Fetch the filtered books
     const booksSnap = await booksRef.get();
 
-    // 2) Fetch all chapters (we'll filter in-memory if needed)
+    // 2) Fetch all chapters (in-memory link up)
     const chaptersSnap = await db.collection("chapters_demo").get();
 
     // 3) Fetch all subChapters
@@ -1195,7 +1205,6 @@ app.get("/api/books", async (req, res) => {
     });
 
     // Now link chapters to the books we actually have in booksMap
-    // (these are already filtered by categoryId if it was provided)
     Object.values(chaptersMap).forEach((chap) => {
       if (booksMap[chap.bookId]) {
         booksMap[chap.bookId].chapters.push({
@@ -1205,7 +1214,7 @@ app.get("/api/books", async (req, res) => {
       }
     });
 
-    // Convert booksMap to array, then sort
+    // Convert booksMap to array
     let booksArray = Object.values(booksMap);
 
     // Sort books by bookName
@@ -1239,7 +1248,6 @@ app.get("/api/books", async (req, res) => {
     return res.status(500).json({ error: "Internal server error" });
   }
 });
-
 /*
   ----------------------------------------------------------
   3) GET /api/user-progress?userId=...
