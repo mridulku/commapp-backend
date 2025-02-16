@@ -1730,35 +1730,30 @@ app.post("/api/learnerpersona", authenticateToken, async (req, res) => {
 // Add this route to your index.js file (or wherever you define routes)
 // e.g., right below "app.get('/test-firestore', ...)" block:
 
+// ------------- Your Onboarding Route -------------
 app.post("/onboardingassessment", authenticateToken, async (req, res) => {
   try {
     const assessmentData = req.body;
+    // attach userId from the token
+    assessmentData.userId = req.user.id || null;
 
-    // If you want to associate data with a user:
-    // const userId = req.user?.id; // if using authenticateToken
-    // assessmentData.userId = userId;
-
-    assessmentData.userId = req.user.id;
-
-
-    // Save the data in the "onboardingAssessments" collection
+    // Save to Firestore (or your DB)
     const docRef = await db.collection("onboardingAssessments").add(assessmentData);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: "Assessment data saved successfully!",
       docId: docRef.id,
     });
   } catch (error) {
     console.error("Error saving assessment data:", error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Failed to save assessment data",
       error: error.message,
     });
   }
 });
-
 
 
 
