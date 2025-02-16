@@ -1765,6 +1765,70 @@ app.post("/onboardingassessment", authenticateToken, async (req, res) => {
 //   console.log(`Server running on port ${PORT}`);
 // });
 
+
+
+// ===================================================
+// ROUTE: FETCH NESTED BOOKS → CHAPTERS → SUBCHAPTERS
+// ===================================================
+// If you only want authorized users to see this, you could add `authenticateToken`
+// as middleware: app.get("/api/books-structure", authenticateToken, async ...)
+app.get("/api/books-structure", async (req, res) => {
+  try {
+    // 1. Fetch all books
+    const booksSnapshot = await db.collection("books_demo").get();
+    const booksData = [];
+
+    for (const bookDoc of booksSnapshot.docs) {
+      const bookId = bookDoc.id;
+      const book = {
+        id: bookId,
+        ...bookDoc.data(),
+      };
+
+      // 2. Fetch all chapters for this book
+      const chaptersSnapshot = await db
+        .collection("chapters_demo")
+        .where("bookId", "==", bookId)
+        .get();
+
+      const chaptersData = [];
+      for (const chapterDoc of chaptersSnapshot.docs) {
+        const chapterId = chapterDoc.id;
+        const chapter = {
+          id: chapterId,
+          ...chapterDoc.data(),
+        };
+
+        // 3. Fetch all subchapters for this chapter
+        const subchaptersSnapshot = await db
+          .collection("subchapters_demo")
+          .where("chapterId", "==", chapterId)
+          .get();
+
+        const subchaptersData = subchaptersSnapshot.docs.map((subDoc) => ({
+          id: subDoc.id,
+          ...subDoc.data(),
+        }));
+
+        // Attach subchapters to the chapter
+        chapter.subchapters = subchaptersData;
+        chaptersData.push(chapter);
+      }
+
+      // Attach chapters to the book
+      book.chapters = chaptersData;
+      booksData.push(book);
+    }
+
+    // 4. Return nested structure
+    return res.status(200).json(booksData);
+  } catch (error) {
+    console.error("Error fetching book structure:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
 // Start the Server
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {

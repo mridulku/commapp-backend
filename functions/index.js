@@ -1064,7 +1064,7 @@ exports.updateSubChaptersDemoOnUpdate = onDocumentUpdated(
       const beforeData = beforeSnap.data() || {};
       const afterData = afterSnap.data() || {};
 
-      // If 'fullText' did not change, do nothing
+      // If 'fullTextFinal' did not change, do nothing
       if (beforeData.fullTextFinal === afterData.fullTextFinal) {
         return;
       }
@@ -1072,16 +1072,37 @@ exports.updateSubChaptersDemoOnUpdate = onDocumentUpdated(
       const newSummary = afterData.fullTextFinal || "";
       const subChapterId = event.params.subChapterId;
 
-      // Update subchapters_demo.{summary} = newSummary
+      // =========================
+      //   1) Compute Word Count
+      // =========================
+      const wordCount = getWordCount(newSummary);
+
+      // =========================
+      //   2) Update Firestore
+      // =========================
       const db = admin.firestore();
       const subDemoRef = db.collection("subchapters_demo").doc(subChapterId);
       await subDemoRef.update({
-        summary: newSummary,
+        summary: newSummary,  // store the full text
+        wordCount: wordCount, // store the computed word count
       });
 
-      console.log(`Updated subchapters_demo/${subChapterId} with new summary text.`);
+      console.log(
+        `Updated subchapters_demo/${subChapterId} with new summary & wordCount=${wordCount}.`
+      );
     } catch (error) {
       console.error("Error in updateSubChaptersDemoOnUpdate:", error);
     }
   }
 );
+
+/**
+ * A simple helper to count words in a string.
+ * Adjust the regex/splitting logic as needed (e.g. ignoring punctuation, etc.)
+ */
+function getWordCount(text = "") {
+  // Trim and split by any sequence of whitespace.
+  // Filter out any empty strings to avoid counting extra.
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  return words.length;
+}
