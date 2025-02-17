@@ -41,8 +41,14 @@ app.options("*", cors(corsOptions));
 // app.use(cors());
 app.use(express.json());
 
+const firebaseServiceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT;
+
+// 2. Parse it into an object
+const serviceAccount = JSON.parse(firebaseServiceAccountJson);
+
+
 // Initialize Firebase Admin
-const serviceAccount = require("./firebase-key.json"); // Ensure this matches the filename of your service account key
+// const serviceAccount = require("./firebase-key.json"); // Ensure this matches the filename of your service account key
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });

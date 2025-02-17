@@ -2,7 +2,10 @@ const admin = require("firebase-admin");
 const csv = require("csv-parser");
 const fs = require("fs");
 
-const serviceAccount = require("./firebase-key.json");
+const firebaseServiceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT;
+
+// 2. Parse it into an object
+const serviceAccount = JSON.parse(firebaseServiceAccountJson);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),

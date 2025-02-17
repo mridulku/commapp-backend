@@ -1,7 +1,10 @@
 // checkBooksCollection.js
 const admin = require("firebase-admin");
 
-const serviceAccount = require("../firebase-key.json"); // path to your key
+const firebaseServiceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT;
+
+// 2. Parse it into an object
+const serviceAccount = JSON.parse(firebaseServiceAccountJson);// path to your key
 
 if (!admin.apps.length) {
   admin.initializeApp({
