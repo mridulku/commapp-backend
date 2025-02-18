@@ -1201,6 +1201,7 @@ app.get("/api/books", async (req, res) => {
         chaptersMap[chapterId].subChapters.push({
           // ADD subChapterId from the doc's ID
           subChapterId: doc.id,
+          proficiency: data.proficiency || null, // <-- new line
           subChapterName: data.name,
           summary: data.summary || "",
           wordCount: data.wordCount
@@ -1349,13 +1350,10 @@ app.get("/api/books-aggregated", async (req, res) => {
   try {
     const { userId, categoryId } = req.query;
     if (!userId) {
-      return res
-        .status(400)
-        .json({ success: false, error: "Missing userId" });
+      return res.status(400).json({ success: false, error: "Missing userId" });
     }
 
     // 1) Fetch the needed collections
-    // If categoryId is provided, filter books by that category
     let booksRef = db.collection("books_demo");
     if (categoryId) {
       booksRef = booksRef.where("categoryId", "==", categoryId);
@@ -1363,24 +1361,11 @@ app.get("/api/books-aggregated", async (req, res) => {
 
     const [booksSnap, chaptersSnap, subChaptersSnap] = await Promise.all([
       booksRef.get(),                         // only books in that category if categoryId was given
-      db.collection("chapters_demo").get(),   // all chapters, we'll link them
+      db.collection("chapters_demo").get(),   // all chapters
       db.collection("subchapters_demo").get() // all subchapters
     ]);
 
-    // 2) Fetch user progress docs for this user
-    const progressSnap = await db
-      .collection("user_progress_demo")
-      .where("userId", "==", userId)
-      .get();
-
-    // Build a quick doneSet: subChapterId -> boolean
-    const doneSet = {};
-    progressSnap.forEach((doc) => {
-      const p = doc.data();
-      doneSet[p.subChapterId] = !!p.isDone;
-    });
-
-    // 3) Build maps
+    // 2) Build base aggregator structures
     const booksMap = {}; // bookId -> aggregator
     booksSnap.forEach((doc) => {
       const d = doc.data();
@@ -1388,12 +1373,14 @@ app.get("/api/books-aggregated", async (req, res) => {
         bookId: doc.id,
         bookName: d.name,
         chaptersMap: {},
+        // We'll track totalWords, plus read/proficient
         totalWords: 0,
-        totalWordsRead: 0,
+        totalWordsReadOrProficient: 0,
+        totalWordsProficient: 0,
       };
     });
 
-    const chaptersMap = {};
+    const chaptersMap = {}; // chapterId -> aggregator
     chaptersSnap.forEach((doc) => {
       const d = doc.data();
       chaptersMap[doc.id] = {
@@ -1402,82 +1389,138 @@ app.get("/api/books-aggregated", async (req, res) => {
         bookId: d.bookId,
         subChaptersMap: {},
         totalWords: 0,
-        totalWordsRead: 0,
+        totalWordsReadOrProficient: 0,
+        totalWordsProficient: 0,
       };
     });
 
-    // 4) Attach subchapters
+    // 3) Attach subchapters: sum "read" or "proficient"
     subChaptersSnap.forEach((doc) => {
       const d = doc.data();
       const subChapterId = doc.id;
       const chapterId = d.chapterId;
-      if (!chaptersMap[chapterId]) return; // Orphan subchapter or belongs to a different book
+      if (!chaptersMap[chapterId]) return; // skip if chapter is not relevant
 
+      // Compute word count from d.wordCount or d.summary
       const computedWordCount = d.wordCount
         ? d.wordCount
         : d.summary
         ? d.summary.trim().split(/\s+/).length
         : 0;
-      const isDone = doneSet[subChapterId] === true;
-      const wordsRead = isDone ? computedWordCount : 0;
 
+      // We read `d.proficiency`, which can be "read", "proficient", or undefined
+      const proficiency = d.proficiency; // e.g. "read" or "proficient"
+
+      let wordsReadOrProficient = 0;
+      let wordsProficient = 0;
+
+      // "read or proficient" => add entire wordCount
+      if (proficiency === "read" || proficiency === "proficient") {
+        wordsReadOrProficient = computedWordCount;
+      }
+      // "proficient" => add entire wordCount
+      if (proficiency === "proficient") {
+        wordsProficient = computedWordCount;
+      }
+
+      // Build the subchapter aggregator object
       chaptersMap[chapterId].subChaptersMap[subChapterId] = {
         subChapterId,
         subChapterName: d.name,
+        proficiency: proficiency || null,  // so front end can see the raw status
         wordCount: computedWordCount,
-        wordsRead,
+        wordsReadOrProficient,
+        wordsProficient,
       };
 
+      // Update chapter-level totals
       chaptersMap[chapterId].totalWords += computedWordCount;
-      chaptersMap[chapterId].totalWordsRead += wordsRead;
+      chaptersMap[chapterId].totalWordsReadOrProficient += wordsReadOrProficient;
+      chaptersMap[chapterId].totalWordsProficient += wordsProficient;
     });
 
-    // 5) Attach chapters to relevant books
+    // 4) Attach chapters to relevant books, sum up at book level
     Object.values(chaptersMap).forEach((chap) => {
       const { bookId } = chap;
-      if (!booksMap[bookId]) return; // Not in the filtered set of books
+      if (!booksMap[bookId]) return; // skip if not matching a selected book
 
+      // Accumulate chapter totals into book totals
       booksMap[bookId].totalWords += chap.totalWords;
-      booksMap[bookId].totalWordsRead += chap.totalWordsRead;
+      booksMap[bookId].totalWordsReadOrProficient += chap.totalWordsReadOrProficient;
+      booksMap[bookId].totalWordsProficient += chap.totalWordsProficient;
+
+      // Put the chapter aggregator into the book aggregator
       booksMap[bookId].chaptersMap[chap.chapterId] = chap;
     });
 
-    // 6) Convert to final array, sort everything
+    // 5) Convert to final array, build the shape
     let finalBooksArr = Object.values(booksMap).map((bookObj) => {
-      const { bookName, chaptersMap, totalWords, totalWordsRead } = bookObj;
-      const bookPct = totalWords > 0 ? (totalWordsRead / totalWords) * 100 : 0;
+      const {
+        bookName,
+        chaptersMap,
+        totalWords,
+        totalWordsReadOrProficient,
+        totalWordsProficient,
+      } = bookObj;
+
+      const readingPct =
+        totalWords > 0 ? (totalWordsReadOrProficient / totalWords) * 100 : 0;
+      const proficientPct =
+        totalWords > 0 ? (totalWordsProficient / totalWords) * 100 : 0;
 
       // Sort chapters by name
       const sortedChapters = Object.values(chaptersMap).sort((a, b) =>
         a.chapterName.localeCompare(b.chapterName)
       );
 
+      // Build chapter array with subchapters
       const chaptersArr = sortedChapters.map((chap) => {
-        // Sort subChapters by name
+        // sort subChapters by name
         const sortedSubs = Object.values(chap.subChaptersMap).sort((s1, s2) =>
           s1.subChapterName.localeCompare(s2.subChapterName)
         );
-        const cPct =
+
+        const chapterReadingPct =
           chap.totalWords > 0
-            ? (chap.totalWordsRead / chap.totalWords) * 100
+            ? (chap.totalWordsReadOrProficient / chap.totalWords) * 100
             : 0;
 
+        const chapterProficientPct =
+          chap.totalWords > 0
+            ? (chap.totalWordsProficient / chap.totalWords) * 100
+            : 0;
+
+        // subChapters array with new proficiency fields
         const subChaptersArr = sortedSubs.map((sub) => {
-          const scPct =
-            sub.wordCount > 0 ? (sub.wordsRead / sub.wordCount) * 100 : 0;
+          // We can compute a sub-level reading and proficient percentage if we like
+          const subReadingPct =
+            sub.wordCount > 0
+              ? (sub.wordsReadOrProficient / sub.wordCount) * 100
+              : 0;
+          const subProficientPct =
+            sub.wordCount > 0
+              ? (sub.wordsProficient / sub.wordCount) * 100
+              : 0;
+
           return {
+            subChapterId: sub.subChapterId,
             subChapterName: sub.subChapterName,
+            proficiency: sub.proficiency, // "read" or "proficient" or null
             wordCount: sub.wordCount,
-            wordsRead: sub.wordsRead,
-            percentageCompleted: scPct,
+            wordsReadOrProficient: sub.wordsReadOrProficient,
+            wordsProficient: sub.wordsProficient,
+            readingPercentage: subReadingPct,
+            proficientPercentage: subProficientPct,
           };
         });
 
         return {
           chapterName: chap.chapterName,
           totalWords: chap.totalWords,
-          totalWordsRead: chap.totalWordsRead,
-          percentageCompleted: cPct,
+          totalWordsReadOrProficient: chap.totalWordsReadOrProficient,
+          totalWordsProficient: chap.totalWordsProficient,
+          readingPercentage: chapterReadingPct,
+          proficientPercentage: chapterProficientPct,
           subChapters: subChaptersArr,
         };
       });
@@ -1485,13 +1528,15 @@ app.get("/api/books-aggregated", async (req, res) => {
       return {
         bookName,
         totalWords,
-        totalWordsRead,
-        percentageCompleted: bookPct,
+        totalWordsReadOrProficient,
+        totalWordsProficient,
+        readingPercentage: readingPct,
+        proficientPercentage: proficientPct,
         chapters: chaptersArr,
       };
     });
 
-    // Finally, sort books by name
+    // 6) sort books by name
     finalBooksArr.sort((a, b) => a.bookName.localeCompare(b.bookName));
 
     return res.json({
@@ -1505,7 +1550,6 @@ app.get("/api/books-aggregated", async (req, res) => {
       .json({ success: false, error: error.message || "Internal server error" });
   }
 });
-
 /*
   ----------------------------------------------------------
   5) POST /api/complete-subchapter
