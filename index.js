@@ -1603,7 +1603,10 @@ app.post("/api/complete-subchapter", async (req, res) => {
     // If user clicked 'Start Reading'
     if (startReading) {
       updateData.readStartTime = new Date();
-      updateData.isDone = false; // not done reading
+      updateData.isDone = false; // Not done reading
+
+      // Mark the subchapter doc as "reading"
+      await subchapterRef.update({ proficiency: "reading" });
     }
 
     // If user clicked 'Finish Reading'
