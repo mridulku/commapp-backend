@@ -1561,76 +1561,41 @@ app.post("/api/complete-subchapter", async (req, res) => {
   try {
     const {
       userId,
-      bookName,
-      chapterName,
-      subChapterName,
+      subChapterId,
       done,
-      startReading,      // New: boolean
-      endReading         // New: boolean
+      startReading,
+      endReading
     } = req.body;
 
-    if (!userId || !bookName || !chapterName || !subChapterName) {
+    // 1) Validate
+    if (!userId || !subChapterId) {
       return res.status(400).json({
         success: false,
-        error: "Missing required fields in request body.",
+        error: "Missing userId or subChapterId in request body."
       });
     }
 
-    // 1) Find the book
-    const bookSnap = await db
-      .collection("books_demo")
-      .where("name", "==", bookName)
-      .get();
-    if (bookSnap.empty) {
-      return res
-        .status(404)
-        .json({ success: false, error: `Book '${bookName}' not found.` });
-    }
-    const bookDoc = bookSnap.docs[0];
-    const bookId = bookDoc.id;
-
-    // 2) Find the chapter
-    const chapterSnap = await db
-      .collection("chapters_demo")
-      .where("name", "==", chapterName)
-      .where("bookId", "==", bookId)
-      .get();
-    if (chapterSnap.empty) {
+    // 2) Find the subchapter by ID
+    const subchapterRef = db.collection("subchapters_demo").doc(subChapterId);
+    const subchapterDoc = await subchapterRef.get();
+    if (!subchapterDoc.exists) {
       return res.status(404).json({
         success: false,
-        error: `Chapter '${chapterName}' not found in book '${bookName}'.`,
+        error: `Sub-chapter with ID '${subChapterId}' not found.`,
       });
     }
-    const chapterDoc = chapterSnap.docs[0];
-    const chapterId = chapterDoc.id;
 
-    // 3) Find the subchapter
-    const subchapterSnap = await db
-      .collection("subchapters_demo")
-      .where("name", "==", subChapterName)
-      .where("chapterId", "==", chapterId)
-      .get();
-    if (subchapterSnap.empty) {
-      return res.status(404).json({
-        success: false,
-        error: `Sub-chapter '${subChapterName}' not found in chapter '${chapterName}'.`,
-      });
-    }
-    const subchapterDoc = subchapterSnap.docs[0];
-    const subChapterId = subchapterDoc.id;
-
-    // 4) Upsert in user_progress_demo
+    // 3) Build an update object for user_progress_demo
     const docId = `${userId}_${subChapterId}`;
     const userProgressRef = db.collection("user_progress_demo").doc(docId);
 
-    // We'll build an update object with whatever fields we need to modify
     const updateData = {
       userId,
       subChapterId,
       updatedAt: new Date(),
     };
 
-    // If the client still uses `done` in the body, we can keep it
+    // If the client still uses `done`
     if (typeof done !== "undefined") {
       updateData.isDone = done;
     }
@@ -1645,9 +1610,12 @@ app.post("/api/complete-subchapter", async (req, res) => {
     if (endReading) {
       updateData.readEndTime = new Date();
       updateData.isDone = true; // reading completed
+
+      // Also mark subCh doc as globally "read"
+      await subchapterRef.update({ proficiency: "read" });
     }
 
-    // Save/merge these fields
+    // 4) Upsert in user_progress_demo
     await userProgressRef.set(updateData, { merge: true });
 
     return res.json({ success: true });
