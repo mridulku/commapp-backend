@@ -1199,6 +1199,8 @@ app.get("/api/books", async (req, res) => {
       const chapterId = data.chapterId;
       if (chaptersMap[chapterId]) {
         chaptersMap[chapterId].subChapters.push({
+          // ADD subChapterId from the doc's ID
+          subChapterId: doc.id,
           subChapterName: data.name,
           summary: data.summary || "",
           wordCount: data.wordCount
@@ -1220,7 +1222,7 @@ app.get("/api/books", async (req, res) => {
       }
     });
 
-    // Convert booksMap to array
+    // Convert booksMap to an array
     let booksArray = Object.values(booksMap);
 
     // Sort books by bookName
@@ -1513,7 +1515,16 @@ app.get("/api/books-aggregated", async (req, res) => {
 */
 app.post("/api/complete-subchapter", async (req, res) => {
   try {
-    const { userId, bookName, chapterName, subChapterName, done } = req.body;
+    const {
+      userId,
+      bookName,
+      chapterName,
+      subChapterName,
+      done,
+      startReading,      // New: boolean
+      endReading         // New: boolean
+    } = req.body;
+
     if (!userId || !bookName || !chapterName || !subChapterName) {
       return res.status(400).json({
         success: false,
@@ -1521,7 +1532,7 @@ app.post("/api/complete-subchapter", async (req, res) => {
       });
     }
 
-    // 1) find the book by name
+    // 1) Find the book
     const bookSnap = await db
       .collection("books_demo")
       .where("name", "==", bookName)
@@ -1534,48 +1545,66 @@ app.post("/api/complete-subchapter", async (req, res) => {
     const bookDoc = bookSnap.docs[0];
     const bookId = bookDoc.id;
 
-    // 2) find the chapter
+    // 2) Find the chapter
     const chapterSnap = await db
       .collection("chapters_demo")
       .where("name", "==", chapterName)
       .where("bookId", "==", bookId)
       .get();
     if (chapterSnap.empty) {
-      return res
-        .status(404)
-        .json({
-          success: false,
-          error: `Chapter '${chapterName}' not found in book '${bookName}'.`,
-        });
+      return res.status(404).json({
+        success: false,
+        error: `Chapter '${chapterName}' not found in book '${bookName}'.`,
+      });
     }
     const chapterDoc = chapterSnap.docs[0];
     const chapterId = chapterDoc.id;
 
-    // 3) find the subchapter
+    // 3) Find the subchapter
     const subchapterSnap = await db
       .collection("subchapters_demo")
       .where("name", "==", subChapterName)
       .where("chapterId", "==", chapterId)
       .get();
     if (subchapterSnap.empty) {
-      return res
-        .status(404)
-        .json({
-          success: false,
-          error: `Sub-chapter '${subChapterName}' not found in chapter '${chapterName}'.`,
-        });
+      return res.status(404).json({
+        success: false,
+        error: `Sub-chapter '${subChapterName}' not found in chapter '${chapterName}'.`,
+      });
     }
     const subchapterDoc = subchapterSnap.docs[0];
     const subChapterId = subchapterDoc.id;
 
     // 4) Upsert in user_progress_demo
     const docId = `${userId}_${subChapterId}`;
-    await db.collection("user_progress_demo").doc(docId).set({
+    const userProgressRef = db.collection("user_progress_demo").doc(docId);
+
+    // We'll build an update object with whatever fields we need to modify
+    const updateData = {
       userId,
       subChapterId,
-      isDone: done,
       updatedAt: new Date(),
-    });
+    };
+
+    // If the client still uses `done` in the body, we can keep it
+    if (typeof done !== "undefined") {
+      updateData.isDone = done;
+    }
+
+    // If user clicked 'Start Reading'
+    if (startReading) {
+      updateData.readStartTime = new Date();
+      updateData.isDone = false; // not done reading
+    }
+
+    // If user clicked 'Finish Reading'
+    if (endReading) {
+      updateData.readEndTime = new Date();
+      updateData.isDone = true; // reading completed
+    }
+
+    // Save/merge these fields
+    await userProgressRef.set(updateData, { merge: true });
 
     return res.json({ success: true });
   } catch (error) {
@@ -1583,7 +1612,6 @@ app.post("/api/complete-subchapter", async (req, res) => {
     return res.status(500).json({ success: false, error: error.message });
   }
 });
-
 
 /*******************************************
  * GET /api/quizzes?bookName=...&chapterName=...&subChapterName=...
@@ -1831,6 +1859,85 @@ app.get("/api/books-structure", async (req, res) => {
   } catch (error) {
     console.error("Error fetching book structure:", error);
     return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
+
+app.post("/api/user-activities", async (req, res) => {
+  try {
+    const { userId, subChapterId, type } = req.body;
+    if (!userId || !subChapterId || !type) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing userId, subChapterId or type in request body."
+      });
+    }
+
+    // Build an object to store
+    const newActivity = {
+      userId,
+      subChapterId,
+      type,
+      // Optionally use a numeric timestamp or Firestore serverTimestamp
+      // numeric approach:
+      timestamp: Date.now(),
+      // or serverTimestamp approach:
+      // timestamp: FieldValue.serverTimestamp(),
+    };
+
+    // Add more fields if needed (metadata, etc.)
+
+    // Insert into user_activities_demo collection
+    const docRef = await db.collection("user_activities_demo").add(newActivity);
+
+    return res.json({
+      success: true,
+      activityId: docRef.id,
+      message: "Activity created successfully"
+    });
+  } catch (error) {
+    console.error("Error in POST /api/user-activities:", error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * GET /api/user-activities?userId=XXX&subChapterId=YYY
+ * (You already had a GET route, but let's consolidate here for clarity)
+ */
+app.get("/api/user-activities", async (req, res) => {
+  try {
+    const { userId, subChapterId } = req.query;
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing userId in query"
+      });
+    }
+
+    let query = db.collection("user_activities_demo")
+      .where("userId", "==", userId);
+
+    if (subChapterId) {
+      query = query.where("subChapterId", "==", subChapterId);
+    }
+
+    query = query.orderBy("timestamp", "asc");
+
+    const snap = await query.get();
+    const activities = [];
+    snap.forEach((doc) => {
+      activities.push({
+        activityId: doc.id,
+        ...doc.data(),
+      });
+    });
+
+    return res.json({ success: true, data: activities });
+  } catch (error) {
+    console.error("Error in GET /api/user-activities:", error);
+    return res.status(500).json({ success: false, error: error.message });
   }
 });
 
