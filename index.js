@@ -1633,78 +1633,53 @@ app.post("/api/complete-subchapter", async (req, res) => {
  * Returns quiz data for the specified subchapter.
  * If no quiz doc is found, returns an empty array.
  *******************************************/
-app.get("/api/quizzes", async (req, res) => {
+
+// server.js or index.js (wherever your Express app is defined)
+
+app.post("/api/quizzes", async (req, res) => {
   try {
-    const { bookName, chapterName, subChapterName } = req.query;
-    if (!bookName || !chapterName || !subChapterName) {
-      return res.status(400).json({
-        success: false,
-        error: "Missing bookName, chapterName or subChapterName in query."
-      });
+    const {
+      userId,
+      subChapterId,
+      subChapterName,
+      questions,
+      selectedAnswers,
+      score
+    } = req.body;
+    
+    // Basic validations
+    if (!userId) {
+      return res.status(400).json({ error: "Missing userId" });
+    }
+    if (!subChapterId) {
+      return res.status(400).json({ error: "Missing subChapterId" });
+    }
+    if (!subChapterName) {
+      return res.status(400).json({ error: "Missing subChapterName" });
+    }
+    if (!Array.isArray(questions)) {
+      return res.status(400).json({ error: "Invalid questions array" });
     }
 
-    // 1) Find the Book doc by name
-    const bookSnap = await db
-      .collection("books_demo")
-      .where("name", "==", bookName)
-      .get();
-    if (bookSnap.empty) {
-      return res
-        .status(404)
-        .json({ success: false, error: `Book '${bookName}' not found.` });
-    }
-    const bookDoc = bookSnap.docs[0];
-    const bookId = bookDoc.id;
-
-    // 2) Find the Chapter doc by name & bookId
-    const chapterSnap = await db
-      .collection("chapters_demo")
-      .where("name", "==", chapterName)
-      .where("bookId", "==", bookId)
-      .get();
-    if (chapterSnap.empty) {
-      return res.status(404).json({
-        success: false,
-        error: `Chapter '${chapterName}' not found in book '${bookName}'.`
-      });
-    }
-    const chapterDoc = chapterSnap.docs[0];
-    const chapterId = chapterDoc.id;
-
-    // 3) Find the Subchapter doc by name & chapterId
-    const subchapterSnap = await db
-      .collection("subchapters_demo")
-      .where("name", "==", subChapterName)
-      .where("chapterId", "==", chapterId)
-      .get();
-    if (subchapterSnap.empty) {
-      return res.status(404).json({
-        success: false,
-        error: `Sub-chapter '${subChapterName}' not found in chapter '${chapterName}'.`
-      });
-    }
-    const subchapterDoc = subchapterSnap.docs[0];
-    const subChapterId = subchapterDoc.id;
-
-    // 4) Fetch the Quiz doc from quizzes_demo (docId = subChapterId or a where)
-    const quizDocRef = db.collection("quizzes_demo").doc(subChapterId);
-    const quizDocSnap = await quizDocRef.get();
-
-    if (!quizDocSnap.exists) {
-      // No quiz for this subchapter
-      return res.json({ success: true, data: [] });
-    }
-
-    const quizData = quizDocSnap.data();
-    // e.g. { subChapterId: ..., questions: [ {questionText, options, ...}, ... ] }
-
-    return res.json({
-      success: true,
-      data: quizData.questions || []
+    // Example: Firestore "quizzes_demo" collection
+    // Adjust if your Firestore instance or collection name differs.
+    const quizzesRef = db.collection("quizzes_demo");
+    
+    // Create a doc with auto-generated ID
+    await quizzesRef.add({
+      userId,
+      subChapterId,
+      subChapterName,
+      questions,
+      selectedAnswers,
+      score,
+      createdAt: new Date()
     });
-  } catch (error) {
-    console.error("Error in /api/quizzes route:", error);
-    return res.status(500).json({ success: false, error: error.message });
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("Error saving quiz:", err);
+    return res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -1955,6 +1930,41 @@ app.get("/api/user-activities", async (req, res) => {
     return res.status(500).json({ success: false, error: error.message });
   }
 });
+
+
+// server.js or wherever you define your Express routes
+
+app.get("/api/quizzes", async (req, res) => {
+  try {
+    const { userId, subChapterId } = req.query;
+    if (!userId || !subChapterId) {
+      return res.status(400).json({ success: false, error: "Missing userId or subChapterId" });
+    }
+
+    // Query Firestore for a doc matching userId + subChapterId
+    const quizzesRef = db.collection("quizzes_demo");
+    const snapshot = await quizzesRef
+      .where("userId", "==", userId)
+      .where("subChapterId", "==", subChapterId)
+      .get();
+
+    if (snapshot.empty) {
+      // No existing quiz
+      return res.json({ success: false, message: "No quiz found for this subChapterId & user." });
+    }
+
+    // If you only store 1 doc per user-subChapter, just grab the first
+    const doc = snapshot.docs[0];
+    const data = doc.data();
+
+    // Return the doc data
+    return res.json({ success: true, data });
+  } catch (err) {
+    console.error("Error fetching quiz:", err);
+    return res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
 
 
 // Start the Server
