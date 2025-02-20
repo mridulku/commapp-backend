@@ -14,6 +14,9 @@ const openaiPackage = require("openai");
 const Configuration = openaiPackage.Configuration;
 const OpenAIApi = openaiPackage.OpenAIApi;
 
+const { onRequest } = require("firebase-functions/v2/https");
+
+
 // Optional token counting
 const { Tiktoken } = require("@dqbd/tiktoken");
 const cl100k = require("@dqbd/tiktoken/encoders/cl100k_base.json");
@@ -1106,3 +1109,184 @@ function getWordCount(text = "") {
   const words = text.trim().split(/\s+/).filter(Boolean);
   return words.length;
 }
+
+//*****Code for Adaptive Sessions Creation Logic */
+
+// We'll replicate the numeric-sorting utilities from your React code
+function parseLeadingSections(str) {
+  const parts = str.split(".").map((p) => p.trim());
+  const result = [];
+  for (let i = 0; i < parts.length; i++) {
+    const maybeNum = parseInt(parts[i], 10);
+    if (!isNaN(maybeNum)) {
+      result.push(maybeNum);
+    } else {
+      break;
+    }
+  }
+  if (result.length === 0) return [Infinity];
+  return result;
+}
+
+function compareSections(aSections, bSections) {
+  const len = Math.max(aSections.length, bSections.length);
+  for (let i = 0; i < len; i++) {
+    const aVal = aSections[i] ?? 0;
+    const bVal = bSections[i] ?? 0;
+    if (aVal !== bVal) {
+      return aVal - bVal;
+    }
+  }
+  return 0;
+}
+
+function sortByNameWithNumericAware(items) {
+  return items.sort((a, b) => {
+    if (!a.name && !b.name) return 0;
+    if (!a.name) return 1;
+    if (!b.name) return -1;
+    const aSections = parseLeadingSections(a.name);
+    const bSections = parseLeadingSections(b.name);
+    const sectionCompare = compareSections(aSections, bSections);
+    if (sectionCompare !== 0) {
+      return sectionCompare;
+    } else {
+      return a.name.localeCompare(b.name);
+    }
+  });
+}
+
+// Our main function: fetch the data, build daily sessions, store in `adaptive_demo`.
+exports.generateAdaptivePlan = onRequest(async (req, res) => {
+  try {
+    // For demonstration, hardcode these. Or pull from req.query, etc.
+    const wpm = 200;
+    const dailyTime = 10;
+    const wordsPerDay = wpm * dailyTime;
+
+    const db = admin.firestore();
+
+    // ~~~~~~~~~ 1) Fetch all books from "books_demo" ~~~~~~~~~
+    const booksSnap = await db.collection("books_demo").get();
+    const booksData = [];
+
+    for (const bookDoc of booksSnap.docs) {
+      const bookId = bookDoc.id;
+      const book = {
+        id: bookId,
+        ...bookDoc.data(),
+      };
+
+      // ~~~~~~~~~ 2) Fetch chapters for this book ~~~~~~~~~
+      const chaptersSnap = await db
+        .collection("chapters_demo")
+        .where("bookId", "==", bookId)
+        .get();
+
+      const chaptersData = [];
+      for (const chapterDoc of chaptersSnap.docs) {
+        const chapterId = chapterDoc.id;
+        const chapter = {
+          id: chapterId,
+          ...chapterDoc.data(),
+        };
+
+        // ~~~~~~~~~ 3) Fetch subchapters for this chapter ~~~~~~~~~
+        const subSnap = await db
+          .collection("subchapters_demo")
+          .where("chapterId", "==", chapterId)
+          .get();
+
+        const subData = subSnap.docs.map((subDoc) => ({
+          id: subDoc.id,
+          ...subDoc.data(),
+        }));
+
+        // Sort subchapters (optional)
+        const sortedSubs = sortByNameWithNumericAware(subData);
+        chapter.subchapters = sortedSubs;
+        chaptersData.push(chapter);
+      }
+
+      // Sort chapters (optional)
+      const sortedChapters = sortByNameWithNumericAware(chaptersData);
+      book.chapters = sortedChapters;
+
+      booksData.push(book);
+    }
+
+    // ~~~~~~~~~ 4) Build "day-by-day" reading plan for each book ~~~~~~~~~
+    // We'll store them in memory, then create the final "sessions" array across all books.
+    // If you want a separate plan per book, you'll adapt the logic accordingly.
+    const allSessions = []; // We'll accumulate subchapter IDs across "days"
+    let dayIndex = 1;
+    let currentDaySubchapIds = [];
+    let currentDayWordCount = 0;
+
+    // Helper function to "push" the current day into allSessions
+    const pushCurrentDay = () => {
+      if (currentDaySubchapIds.length > 0) {
+        // We'll store subchapter IDs with sessionLabel = dayIndex
+        allSessions.push({
+          sessionLabel: dayIndex.toString(),
+          subChapterIds: [...currentDaySubchapIds],
+        });
+        dayIndex += 1;
+        currentDaySubchapIds = [];
+        currentDayWordCount = 0;
+      }
+    };
+
+    // We'll iterate across each book, each chapter, each subchapter
+    for (const book of booksData) {
+      if (!book.chapters) continue;
+      for (const chapter of book.chapters) {
+        if (!chapter.subchapters) continue;
+        for (const sub of chapter.subchapters) {
+          const subWordCount = sub.wordCount || 0;
+          // If adding this subchapter exceeds the daily limit, push the current day
+          if (
+            currentDayWordCount + subWordCount > wordsPerDay &&
+            currentDayWordCount > 0
+          ) {
+            pushCurrentDay();
+          }
+          // Add this subchapter to the current day
+          currentDaySubchapIds.push(sub.id);
+          currentDayWordCount += subWordCount;
+        }
+      }
+    }
+
+    // If there's a leftover partial day
+    if (currentDaySubchapIds.length > 0) {
+      pushCurrentDay();
+    }
+
+    // ~~~~~~~~~ 5) Write to "adaptive_demo" in the format:
+    // {
+    //   createdAt: timestamp,
+    //   sessions: [ { sessionLabel, subChapterIds: [...] }, ...]
+    // }
+    // ~~~~~~~~~
+    const planDoc = {
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      sessions: allSessions,
+      planName: "Generated plan from Cloud Function",
+    };
+
+    await db.collection("adaptive_demo").add(planDoc);
+
+    // ~~~~~~~~~ 6) Return a success response ~~~~~~~~~
+    res.status(200).json({
+      message: "Successfully generated an adaptive plan and stored in 'adaptive_demo'.",
+      planDoc,
+    });
+  } catch (error) {
+    console.error("Error generating adaptive plan:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+//Ending for code of adaptive sessions//

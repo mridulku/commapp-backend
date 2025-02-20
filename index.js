@@ -1164,13 +1164,41 @@ app.get("/api/books", async (req, res) => {
     // Fetch the filtered books
     const booksSnap = await booksRef.get();
 
-    // 2) Fetch all chapters (in-memory link up)
+    // 2) Fetch all chapters
     const chaptersSnap = await db.collection("chapters_demo").get();
 
     // 3) Fetch all subChapters
     const subChaptersSnap = await db.collection("subchapters_demo").get();
 
-    // Build quick maps
+    // 4) Fetch the most recent doc in "adaptive_demo" for this user (if userId is relevant)
+    //    If you don't store userId in adaptive_demo, remove that .where(...) part.
+    let adaptiveRef = db.collection("adaptive_demo").orderBy("createdAt", "desc").limit(1);
+    if (userId) {
+      adaptiveRef = adaptiveRef.where("userId", "==", userId);
+    }
+    const adaptiveSnap = await adaptiveRef.get();
+
+    // We'll create a map from subChapterId => sessionLabel
+    // If subChapterId not in the plan, that means adaptive = false.
+    const subChIdToSession = {};
+
+    if (!adaptiveSnap.empty) {
+      // Assume we only take the first (most recent) doc
+      const docData = adaptiveSnap.docs[0].data();
+      const sessions = docData.sessions || []; // array of { sessionLabel, subChapterIds }
+
+      sessions.forEach((sess) => {
+        const label = sess.sessionLabel; // e.g., "1"
+        (sess.subChapterIds || []).forEach((id) => {
+          // store sessionLabel for this subchapter
+          subChIdToSession[id] = label;
+        });
+      });
+    }
+
+    // ------------------------------------
+    // Build quick maps for books & chapters
+    // ------------------------------------
     const booksMap = {}; // key = doc.id for the book
     booksSnap.forEach((doc) => {
       const data = doc.data();
@@ -1181,7 +1209,6 @@ app.get("/api/books", async (req, res) => {
       };
     });
 
-    // We’ll store all chapters in a map first
     const chaptersMap = {}; // key = doc.id for the chapter
     chaptersSnap.forEach((doc) => {
       const data = doc.data();
@@ -1197,15 +1224,24 @@ app.get("/api/books", async (req, res) => {
     subChaptersSnap.forEach((doc) => {
       const data = doc.data();
       const chapterId = data.chapterId;
+
+      // If this chapter is in our chaptersMap, push subchapter
       if (chaptersMap[chapterId]) {
+        const subChapterId = doc.id;
+
+        // Check if subChapterId is in the adaptive plan
+        const sessionLabel = subChIdToSession[subChapterId] || null;
+        const isAdaptive = sessionLabel !== null;
+
         chaptersMap[chapterId].subChapters.push({
-          // ADD subChapterId from the doc's ID
-          subChapterId: doc.id,
-          proficiency: data.proficiency || null, // <-- new line
+          subChapterId,
+          proficiency: data.proficiency || null,
           subChapterName: data.name,
           summary: data.summary || "",
-          adaptive: data.adaptive || false,
-          session: data.session || null,
+          // Mark adaptive based on membership in subChIdToSession
+          adaptive: isAdaptive,
+          // If it's in the plan, store the sessionLabel
+          session: sessionLabel,
           wordCount: data.wordCount
             ? data.wordCount
             : data.summary
@@ -1215,7 +1251,7 @@ app.get("/api/books", async (req, res) => {
       }
     });
 
-    // Now link chapters to the books we actually have in booksMap
+    // Now link chapters to books we actually have in booksMap
     Object.values(chaptersMap).forEach((chap) => {
       if (booksMap[chap.bookId]) {
         booksMap[chap.bookId].chapters.push({
