@@ -1233,9 +1233,22 @@ app.get("/api/books", async (req, res) => {
         const sessionLabel = subChIdToSession[subChapterId] || null;
         const isAdaptive = sessionLabel !== null;
 
+        let startTime = null;
+        let endTime = null;
+        if (data.readStartTime) {
+      startTime = data.readStartTime.toDate().toISOString();
+    }
+        if (data.readEndTime) {
+      endTime = data.readEndTime.toDate().toISOString();
+    }
+
+
         chaptersMap[chapterId].subChapters.push({
           subChapterId,
           proficiency: data.proficiency || null,
+          
+      readStartTime: startTime,  // now a string
+      readEndTime: endTime,      // now a string
           subChapterName: data.name,
           summary: data.summary || "",
           // Mark adaptive based on membership in subChIdToSession
@@ -1600,7 +1613,6 @@ app.post("/api/complete-subchapter", async (req, res) => {
     const {
       userId,
       subChapterId,
-      done,
       startReading,
       endReading
     } = req.body;
@@ -1623,41 +1635,27 @@ app.post("/api/complete-subchapter", async (req, res) => {
       });
     }
 
-    // 3) Build an update object for user_progress_demo
-    const docId = `${userId}_${subChapterId}`;
-    const userProgressRef = db.collection("user_progress_demo").doc(docId);
-
-    const updateData = {
-      userId,
-      subChapterId,
-      updatedAt: new Date(),
-    };
-
-    // If the client still uses `done`
-    if (typeof done !== "undefined") {
-      updateData.isDone = done;
-    }
+    // 3) Prepare update data
+    const updateData = {};
 
     // If user clicked 'Start Reading'
     if (startReading) {
+      updateData.proficiency = "reading";
       updateData.readStartTime = new Date();
-      updateData.isDone = false; // Not done reading
-
-      // Mark the subchapter doc as "reading"
-      await subchapterRef.update({ proficiency: "reading" });
+      // Overwrite or clear any old end time
+      updateData.readEndTime = null;
     }
 
     // If user clicked 'Finish Reading'
     if (endReading) {
+      updateData.proficiency = "read";
       updateData.readEndTime = new Date();
-      updateData.isDone = true; // reading completed
-
-      // Also mark subCh doc as globally "read"
-      await subchapterRef.update({ proficiency: "read" });
+      // (We assume readStartTime already set if it was reading)
+      // If you want to ensure readStartTime is not null, you can handle that logic here
     }
 
-    // 4) Upsert in user_progress_demo
-    await userProgressRef.set(updateData, { merge: true });
+    // 4) Update the subchapters_demo doc
+    await subchapterRef.update(updateData);
 
     return res.json({ success: true });
   } catch (error) {
@@ -1665,6 +1663,7 @@ app.post("/api/complete-subchapter", async (req, res) => {
     return res.status(500).json({ success: false, error: error.message });
   }
 });
+
 
 /*******************************************
  * GET /api/quizzes?bookName=...&chapterName=...&subChapterName=...
