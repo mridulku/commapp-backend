@@ -1204,6 +1204,8 @@ app.get("/api/books", async (req, res) => {
           proficiency: data.proficiency || null, // <-- new line
           subChapterName: data.name,
           summary: data.summary || "",
+          adaptive: data.adaptive || false,
+          session: data.session || null,
           wordCount: data.wordCount
             ? data.wordCount
             : data.summary
