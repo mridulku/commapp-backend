@@ -1170,27 +1170,64 @@ app.get("/api/books", async (req, res) => {
     // 3) Fetch all subChapters
     const subChaptersSnap = await db.collection("subchapters_demo").get();
 
-    // 4) Fetch the most recent doc in "adaptive_demo" for this user (if userId is relevant)
-    //    If you don't store userId in adaptive_demo, remove that .where(...) part.
+    // 4) Possibly fetch "adaptive_demo" doc for user
     let adaptiveRef = db.collection("adaptive_demo").orderBy("createdAt", "desc").limit(1);
     if (userId) {
       adaptiveRef = adaptiveRef.where("userId", "==", userId);
     }
     const adaptiveSnap = await adaptiveRef.get();
 
-    // We'll create a map from subChapterId => sessionLabel
-    // If subChapterId not in the plan, that means adaptive = false.
+    // 5) Fetch quiz data from "quizzes_demo" for this user (if userId is relevant).
+    //    We store them in a map keyed by subChapterId => doc with the most recent createdAt.
+    let quizzesRef = db.collection("quizzes_demo");
+    if (userId) {
+      quizzesRef = quizzesRef.where("userId", "==", userId);
+    }
+    const quizzesSnap = await quizzesRef.get();
+
+    // We'll store for each subChap: { score, createdAt: ... }
+    const quizzesMap = {}; 
+    quizzesSnap.forEach((doc) => {
+      const qData = doc.data();
+      const scId = qData.subChapterId;
+      // If there's more than one quiz doc for the same subChId, keep the one with the newest createdAt
+      // We'll assume 'createdAt' is a Firestore Timestamp
+      const docCreatedAt = qData.createdAt || doc.createTime; 
+      // doc.createTime is a Firestore server field if 'createdAt' wasn't set, but better to store 'createdAt' in your quiz docs explicitly
+
+      if (!quizzesMap[scId]) {
+        // First time we see this subchapter
+        quizzesMap[scId] = {
+          quizScore: qData.score || null,
+          createdAt: docCreatedAt
+        };
+      } else {
+        // Compare timestamps
+        const existing = quizzesMap[scId];
+        if (docCreatedAt && existing.createdAt) {
+          // Convert Firestore Timestamp to milliseconds
+          const newMs = docCreatedAt.toMillis ? docCreatedAt.toMillis() : 0;
+          const oldMs = existing.createdAt.toMillis ? existing.createdAt.toMillis() : 0;
+          if (newMs > oldMs) {
+            quizzesMap[scId] = {
+              quizScore: qData.score || null,
+              createdAt: docCreatedAt
+            };
+          }
+        }
+      }
+    });
+
+    // ------------------------------------
+    // Build subChId => sessionLabel from adaptive_demo
+    // ------------------------------------
     const subChIdToSession = {};
-
     if (!adaptiveSnap.empty) {
-      // Assume we only take the first (most recent) doc
       const docData = adaptiveSnap.docs[0].data();
-      const sessions = docData.sessions || []; // array of { sessionLabel, subChapterIds }
-
+      const sessions = docData.sessions || [];
       sessions.forEach((sess) => {
-        const label = sess.sessionLabel; // e.g., "1"
+        const label = sess.sessionLabel;
         (sess.subChapterIds || []).forEach((id) => {
-          // store sessionLabel for this subchapter
           subChIdToSession[id] = label;
         });
       });
@@ -1220,51 +1257,59 @@ app.get("/api/books", async (req, res) => {
       };
     });
 
-    // Link sub-chapters to chapters
+    // ------------------------------------
+    // Link subChapters to chapters
+    // ------------------------------------
     subChaptersSnap.forEach((doc) => {
       const data = doc.data();
       const chapterId = data.chapterId;
 
-      // If this chapter is in our chaptersMap, push subchapter
       if (chaptersMap[chapterId]) {
         const subChapterId = doc.id;
 
-        // Check if subChapterId is in the adaptive plan
+        // Check if in adaptive plan
         const sessionLabel = subChIdToSession[subChapterId] || null;
         const isAdaptive = sessionLabel !== null;
 
+        // Convert Firestore Timestamps to ISO strings
         let startTime = null;
         let endTime = null;
         if (data.readStartTime) {
-      startTime = data.readStartTime.toDate().toISOString();
-    }
+          startTime = data.readStartTime.toDate().toISOString();
+        }
         if (data.readEndTime) {
-      endTime = data.readEndTime.toDate().toISOString();
-    }
+          endTime = data.readEndTime.toDate().toISOString();
+        }
 
+        // Find the quiz doc with the most recent createdAt for this subchapter
+        let quizScore = null;
+        if (quizzesMap[subChapterId]) {
+          quizScore = quizzesMap[subChapterId].quizScore;
+        }
 
         chaptersMap[chapterId].subChapters.push({
           subChapterId,
-          proficiency: data.proficiency || null,
-          
-      readStartTime: startTime,  // now a string
-      readEndTime: endTime,      // now a string
           subChapterName: data.name,
           summary: data.summary || "",
-          // Mark adaptive based on membership in subChIdToSession
+          proficiency: data.proficiency || null,
+          readStartTime: startTime,
+          readEndTime: endTime,
           adaptive: isAdaptive,
-          // If it's in the plan, store the sessionLabel
           session: sessionLabel,
           wordCount: data.wordCount
             ? data.wordCount
             : data.summary
-            ? data.summary.trim().split(/\s+/).length
-            : 0,
+              ? data.summary.trim().split(/\s+/).length
+              : 0,
+
+          quizScore,
         });
       }
     });
 
-    // Now link chapters to books we actually have in booksMap
+    // ------------------------------------
+    // Now link chapters to their books
+    // ------------------------------------
     Object.values(chaptersMap).forEach((chap) => {
       if (booksMap[chap.bookId]) {
         booksMap[chap.bookId].chapters.push({
@@ -1274,20 +1319,22 @@ app.get("/api/books", async (req, res) => {
       }
     });
 
-    // Convert booksMap to an array
+    // ------------------------------------
+    // Convert booksMap to an array & do final sorting
+    // ------------------------------------
     let booksArray = Object.values(booksMap);
 
     // Sort books by bookName
     booksArray.sort((a, b) => a.bookName.localeCompare(b.bookName));
 
-    // Sort chapters by chapterName & subChapters by subChapterName
+    // Sort chapters & subchapters by name
     booksArray = booksArray.map((book) => {
-      const sortedChapters = [...book.chapters];
-      sortedChapters.sort((c1, c2) => c1.chapterName.localeCompare(c2.chapterName));
+      const sortedChapters = [...book.chapters].sort((c1, c2) =>
+        c1.chapterName.localeCompare(c2.chapterName)
+      );
 
       const newChapters = sortedChapters.map((c) => {
-        const sortedSubs = [...c.subChapters];
-        sortedSubs.sort((s1, s2) =>
+        const sortedSubs = [...c.subChapters].sort((s1, s2) =>
           s1.subChapterName.localeCompare(s2.subChapterName)
         );
         return {
@@ -1302,12 +1349,14 @@ app.get("/api/books", async (req, res) => {
       };
     });
 
+    // Finally return
     return res.json(booksArray);
   } catch (error) {
     console.error("Error fetching books:", error);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
+
 /*
   ----------------------------------------------------------
   3) GET /api/user-progress?userId=...
@@ -1978,19 +2027,25 @@ app.get("/api/quizzes", async (req, res) => {
       return res.status(400).json({ success: false, error: "Missing userId or subChapterId" });
     }
 
-    // Query Firestore for a doc matching userId + subChapterId
+    // Query Firestore for the MOST RECENT doc matching userId + subChapterId
+    // by ordering 'createdAt' descending, then limiting to 1
     const quizzesRef = db.collection("quizzes_demo");
     const snapshot = await quizzesRef
       .where("userId", "==", userId)
       .where("subChapterId", "==", subChapterId)
+      .orderBy("createdAt", "desc")
+      .limit(1)
       .get();
 
     if (snapshot.empty) {
       // No existing quiz
-      return res.json({ success: false, message: "No quiz found for this subChapterId & user." });
+      return res.json({
+        success: false,
+        message: "No quiz found for this subChapterId & user."
+      });
     }
 
-    // If you only store 1 doc per user-subChapter, just grab the first
+    // Grab the first (and only) doc from this query
     const doc = snapshot.docs[0];
     const data = doc.data();
 
