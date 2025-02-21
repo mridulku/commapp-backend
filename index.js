@@ -2128,6 +2128,102 @@ app.get("/api/quizzes", async (req, res) => {
 });
 
 
+// server/app.js (or your main Express file)
+app.get("/api/learner-goal", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing userId query parameter.",
+      });
+    }
+
+    // We'll query the collection e.g. "learner_personas" for docs where userId == ...
+    const snapshot = await db
+      .collection("learnerPersonas") // or your actual collection name
+      .where("userId", "==", userId)
+      .limit(1)
+      .get();
+
+    if (snapshot.empty) {
+      // No doc for this user
+      return res.json({
+        success: true,
+        data: null, // or { preparationGoal: null }
+      });
+    }
+
+    // Grab the first doc
+    const doc = snapshot.docs[0];
+    const docData = doc.data();
+
+    // "answers" is a map, we want answers.preparationGoal
+    const preparationGoal = docData.answers?.preparationGoal || null;
+
+    return res.json({
+      success: true,
+      data: {
+        preparationGoal,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching learner goal:", error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || "Internal server error",
+    });
+  }
+});
+
+
+
+app.get("/api/reading-speed", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing userId query parameter.",
+      });
+    }
+
+    // We'll query "onboarding_assessments" for the user
+    const snapshot = await db
+      .collection("onboardingAssessments") // or your actual collection name
+      .where("userId", "==", userId)
+      .limit(1)
+      .get();
+
+    if (snapshot.empty) {
+      return res.json({
+        success: true,
+        data: null,
+      });
+    }
+
+    const doc = snapshot.docs[0];
+    const docData = doc.data();
+
+    // The field is named readingTimeSec (the total # of seconds?)
+    // Possibly you'd convert it to WPM if you want, but let's just return it as is.
+    const readingTimeSec = docData.readingTimeSec || null;
+
+    return res.json({
+      success: true,
+      data: {
+        readingTimeSec,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching reading speed:", error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || "Internal server error",
+    });
+  }
+});
+
 
 // Start the Server
 const PORT = process.env.PORT || 3001;
