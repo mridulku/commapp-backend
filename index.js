@@ -1940,82 +1940,152 @@ app.get("/api/books-structure", async (req, res) => {
 
 
 
+// POST /api/user-activities
 app.post("/api/user-activities", async (req, res) => {
   try {
-    const { userId, subChapterId, type } = req.body;
-    if (!userId || !subChapterId || !type) {
+    const { userId, subChapterId, eventType, timestamp } = req.body;
+
+    if (!userId || !subChapterId || !eventType) {
       return res.status(400).json({
         success: false,
-        error: "Missing userId, subChapterId or type in request body."
+        error: "Missing required fields: userId, subChapterId, eventType.",
       });
     }
 
-    // Build an object to store
-    const newActivity = {
+    // Build document data
+    const docData = {
       userId,
       subChapterId,
-      type,
-      // Optionally use a numeric timestamp or Firestore serverTimestamp
-      // numeric approach:
-      timestamp: Date.now(),
-      // or serverTimestamp approach:
-      // timestamp: FieldValue.serverTimestamp(),
+      eventType,
+      timestamp: timestamp ? new Date(timestamp) : new Date(), // fallback
     };
 
-    // Add more fields if needed (metadata, etc.)
+    await db.collection("user_activities_demo").add(docData);
 
-    // Insert into user_activities_demo collection
-    const docRef = await db.collection("user_activities_demo").add(newActivity);
-
-    return res.json({
-      success: true,
-      activityId: docRef.id,
-      message: "Activity created successfully"
-    });
+    return res.json({ success: true });
   } catch (error) {
     console.error("Error in POST /api/user-activities:", error);
-    return res.status(500).json({ success: false, error: error.message });
+    return res
+      .status(500)
+      .json({ success: false, error: error.message || "Internal server error" });
   }
 });
 
-/**
- * GET /api/user-activities?userId=XXX&subChapterId=YYY
- * (You already had a GET route, but let's consolidate here for clarity)
- */
+
+
+// GET /api/user-activities?userId=123
 app.get("/api/user-activities", async (req, res) => {
   try {
-    const { userId, subChapterId } = req.query;
+    const { userId } = req.query;
     if (!userId) {
       return res.status(400).json({
         success: false,
-        error: "Missing userId in query"
+        error: "Missing 'userId' query parameter.",
       });
     }
 
-    let query = db.collection("user_activities_demo")
-      .where("userId", "==", userId);
+    // Build query: userId + orderBy timestamp desc
+    let query = db
+      .collection("user_activities_demo")
+      .where("userId", "==", userId)
+      .orderBy("timestamp", "desc"); // optional limit(...) if you only want the last X
 
-    if (subChapterId) {
-      query = query.where("subChapterId", "==", subChapterId);
+    const snapshot = await query.get();
+    if (snapshot.empty) {
+      return res.json({
+        success: true,
+        data: [],
+      });
     }
 
-    query = query.orderBy("timestamp", "asc");
-
-    const snap = await query.get();
-    const activities = [];
-    snap.forEach((doc) => {
-      activities.push({
-        activityId: doc.id,
-        ...doc.data(),
-      });
+    // Map docs to a simple array
+    const activities = snapshot.docs.map((doc) => {
+      const data = doc.data();
+      return {
+        id: doc.id, // doc id if needed
+        eventType: data.eventType,
+        subChapterId: data.subChapterId,
+        timestamp: data.timestamp
+          ? data.timestamp.toDate().toISOString() // convert Firestore Timestamp to string
+          : null,
+        userId: data.userId,
+      };
     });
 
-    return res.json({ success: true, data: activities });
-  } catch (error) {
-    console.error("Error in GET /api/user-activities:", error);
-    return res.status(500).json({ success: false, error: error.message });
+    return res.json({
+      success: true,
+      data: activities,
+    });
+  } catch (err) {
+    console.error("Error fetching user activities:", err);
+    return res.status(500).json({
+      success: false,
+      error: err.message || "Internal server error",
+    });
   }
 });
+
+
+
+
+// GET /api/user-book?userId=xxx
+app.get("/api/user-book", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Missing userId query parameter." });
+    }
+
+    // We want the first or most recent book. Let's assume "createdAt" is a Firestore Timestamp
+    // We'll order by "createdAt" descending and limit(1).
+    const booksRef = db.collection("books_demo");
+    const query = booksRef
+      .where("userId", "==", userId)
+      .orderBy("createdAt", "desc")
+      .limit(1);
+
+    const snapshot = await query.get();
+
+    if (snapshot.empty) {
+      // No books for this user
+      return res.json({
+        success: true,
+        data: null, // or an empty object
+      });
+    }
+
+    // Grab the first doc
+    const doc = snapshot.docs[0];
+    const docData = doc.data();
+    // Convert "createdAt" if needed
+    let createdAtISO = null;
+    if (docData.createdAt) {
+      createdAtISO = docData.createdAt.toDate().toISOString();
+    }
+
+    // Return minimal info or the full doc
+    return res.json({
+      success: true,
+      data: {
+        bookId: doc.id,
+        name: docData.name,
+        userId: docData.userId,
+        categoryId: docData.categoryId || null,
+        createdAt: createdAtISO,
+      },
+    });
+  } catch (err) {
+    console.error("Error in GET /api/user-book:", err);
+    return res.status(500).json({
+      success: false,
+      error: err.message || "Internal server error",
+    });
+  }
+});
+
+
 
 
 // server.js or wherever you define your Express routes
