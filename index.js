@@ -2225,6 +2225,81 @@ app.get("/api/reading-speed", async (req, res) => {
 });
 
 
+app.get("/api/has-read-first-subchapter", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing userId query parameter."
+      });
+    }
+
+    // Query user_activities_demo where userId == ... AND eventType == "stopReading"
+    // If we find at least one doc, user has read a subchapter
+    const snapshot = await db
+      .collection("user_activities_demo")
+      .where("userId", "==", userId)
+      .where("eventType", "==", "stopReading")
+      .limit(1)
+      .get();
+
+    const hasReadFirstSubchapter = !snapshot.empty;
+
+    return res.json({
+      success: true,
+      data: {
+        hasReadFirstSubchapter
+      }
+    });
+  } catch (error) {
+    console.error("Error in /api/has-read-first-subchapter:", error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || "Internal server error"
+    });
+  }
+});
+
+
+app.get("/api/has-completed-quiz", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing userId query parameter."
+      });
+    }
+
+    // Query user_activities_demo where userId == ... AND eventType == "quizCompleted"
+    // If we find at least one doc, user has completed a quiz
+    const snapshot = await db
+      .collection("user_activities_demo")
+      .where("userId", "==", userId)
+      .where("eventType", "==", "quizCompleted")
+      .limit(1)
+      .get();
+
+    const hasCompletedQuiz = !snapshot.empty;
+
+    return res.json({
+      success: true,
+      data: {
+        hasCompletedQuiz
+      }
+    });
+  } catch (error) {
+    console.error("Error in /api/has-completed-quiz:", error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || "Internal server error"
+    });
+  }
+});
+
+
+
 // Start the Server
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
