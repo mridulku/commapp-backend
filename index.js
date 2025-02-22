@@ -2300,6 +2300,32 @@ app.get("/api/has-completed-quiz", async (req, res) => {
 
 
 
+
+
+app.post("/api/onboard", async (req, res) => {
+  try {
+    const { name, age, school, exam } = req.body;
+    if (!name || !age || !school || !exam) {
+      return res.status(400).json({ error: 'Missing name, age, exam or school.' });
+    }
+
+    const docRef = await db.collection('onboardedUsers').add({
+      name,
+      exam,     // <--- store it here
+      age,
+      school,
+      createdAt: new Date(),
+    });
+
+    return res.json({ success: true, docId: docRef.id });
+  } catch (error) {
+    console.error('Error storing onboarding data:', error);
+    return res.status(500).json({ error: 'Failed to store onboarding data.' });
+  }
+});
+
+
+
 // Start the Server
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
