@@ -1837,6 +1837,55 @@ app.post("/api/learnerpersona", authenticateToken, async (req, res) => {
   }
 });
 
+
+// In your Express server app.js (or router file), for example:
+app.get("/api/learner-personas", async (req, res) => {
+  try {
+    const userId = req.query.userId;
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing userId in query params.",
+      });
+    }
+
+    // Pseudocode: read from Firestore, Mongo, or wherever you're storing learnerPersonas
+    // Example with Firestore (adjust to your DB):
+    // const docRef = db.collection("learnerPersonas").doc(userId);
+    // const doc = await docRef.get();
+
+    // Example with Mongoose or any other DB
+    // const doc = await LearnerPersonaModel.findOne({ userId });
+
+    // For demonstration, let's pretend we found a doc with isOnboarded = true
+    const doc = {
+      userId: userId,
+      isOnboarded: true, // or false, depends on your DB
+    };
+
+    if (!doc) {
+      return res.status(404).json({
+        success: false,
+        error: "No learnerPersona found for this user.",
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        isOnboarded: doc.isOnboarded,
+      },
+    });
+  } catch (err) {
+    console.error("Error fetching learnerPersona:", err);
+    res.status(500).json({
+      success: false,
+      error: "Server error fetching learnerPersona.",
+    });
+  }
+});
+
+
 // Add this route to your index.js file (or wherever you define routes)
 // e.g., right below "app.get('/test-firestore', ...)" block:
 
