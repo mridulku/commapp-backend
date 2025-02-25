@@ -1561,3 +1561,210 @@ exports.generatePlanStats = onDocumentCreated({
     logger.error("Error in generatePlanStats trigger:", error);
   }
 });
+
+
+
+function getAlwaysAllActivities(subchapter, wpm) {
+  const wordCount = subchapter.wordCount || 0;
+  const readTime = wordCount ? Math.ceil(wordCount / wpm) : 0;
+
+  return [
+    {
+      type: "READ",
+      timeNeeded: readTime,
+      bookId: subchapter.bookId,
+      chapterId: subchapter.chapterId,
+      subChapterId: subchapter.id,
+      subChapterName: subchapter.name || "",
+    },
+    {
+      type: "QUIZ",
+      timeNeeded: 1,
+      bookId: subchapter.bookId,
+      chapterId: subchapter.chapterId,
+      subChapterId: subchapter.id,
+      subChapterName: subchapter.name || "",
+    },
+    {
+      type: "REVISE",
+      timeNeeded: 1,
+      bookId: subchapter.bookId,
+      chapterId: subchapter.chapterId,
+      subChapterId: subchapter.id,
+      subChapterName: subchapter.name || "",
+    },
+  ];
+}
+
+
+
+
+
+exports.generateBookPlan = onRequest(async (req, res) => {
+  try {
+    // ---------------------------------------------------------
+    // A) Extract Inputs
+    // ---------------------------------------------------------
+    const userId = req.query.userId || req.body.userId;
+    if (!userId) {
+      return res.status(400).json({
+        error: "Missing userId in request (req.query or req.body).",
+      });
+    }
+
+    // We'll accept a targetDate (like the adaptive function).
+    const targetDateStr = req.query.targetDate || req.body.targetDate;
+    if (!targetDateStr) {
+      return res.status(400).json({
+        error: "Missing targetDate in request (req.query or req.body).",
+      });
+    }
+    const targetDate = new Date(targetDateStr);
+    if (isNaN(targetDate.getTime())) {
+      return res.status(400).json({
+        error: "Invalid targetDate format. Provide a valid date string (e.g. '2025-07-20').",
+      });
+    }
+
+    // Calculate maxDayCount like the adaptive plan (even if we won't use it)
+    const today = new Date();
+    let maxDayCount = getDaysBetween(today, targetDate);
+    if (maxDayCount < 0) maxDayCount = 0;
+
+    // ---------------------------------------------------------
+    // B) Fetch the user's persona (to get WPM for reading time).
+    // ---------------------------------------------------------
+    const db = admin.firestore();
+    const personaRef = db.collection("learnerPersonas").doc(userId);
+    const personaSnap = await personaRef.get();
+
+    if (!personaSnap.exists) {
+      return res.status(404).json({
+        error: `No learner persona found for userId: ${userId}`,
+      });
+    }
+    const { wpm } = personaSnap.data() || {};
+    if (!wpm) {
+      return res.status(400).json({
+        error: "Persona document must contain 'wpm'.",
+      });
+    }
+
+    // ---------------------------------------------------------
+    // C) Fetch Books -> Chapters -> Subchapters
+    // ---------------------------------------------------------
+    const booksSnap = await db.collection("books_demo").get();
+    const booksData = [];
+
+    for (const bookDoc of booksSnap.docs) {
+      const bookId = bookDoc.id;
+      const bookData = bookDoc.data();
+
+      // fetch chapters
+      const chaptersSnap = await db
+        .collection("chapters_demo")
+        .where("bookId", "==", bookId)
+        .get();
+
+      const chapters = [];
+      for (const chapterDoc of chaptersSnap.docs) {
+        const chapterId = chapterDoc.id;
+        const chapterData = chapterDoc.data();
+
+        // fetch subchapters
+        const subSnap = await db
+          .collection("subchapters_demo")
+          .where("chapterId", "==", chapterId)
+          .get();
+
+        const subchapters = subSnap.docs.map((subDoc) => ({
+          id: subDoc.id,
+          bookId,
+          chapterId,
+          ...subDoc.data(),
+        }));
+
+        // sort subchapters
+        const sortedSubs = sortByNameWithNumericAware(subchapters);
+
+        chapters.push({
+          id: chapterId,
+          ...chapterData,
+          subchapters: sortedSubs,
+        });
+      }
+
+      // sort chapters
+      const sortedChapters = sortByNameWithNumericAware(chapters);
+
+      booksData.push({
+        id: bookId,
+        ...bookData,
+        chapters: sortedChapters,
+      });
+    }
+
+    // ---------------------------------------------------------
+    // D) Build "sessions" (1 session = 1 chapter)
+    // ---------------------------------------------------------
+    const sessions = [];
+    let sessionCounter = 1;
+
+    for (const book of booksData) {
+      if (!book.chapters) continue;
+
+      for (const chapter of book.chapters) {
+        const activities = [];
+        if (chapter.subchapters) {
+          for (const sub of chapter.subchapters) {
+            // Always do READ, QUIZ, REVISE
+            const subActivities = getAlwaysAllActivities(sub, wpm);
+            activities.push(...subActivities);
+          }
+        }
+
+        // We label each session with a numeric index
+        sessions.push({
+          sessionLabel: sessionCounter.toString(),
+          activities,
+        });
+        sessionCounter++;
+      }
+    }
+
+    // ---------------------------------------------------------
+    // E) Write the plan to Firestore (like adaptive plan)
+    // ---------------------------------------------------------
+    const planDoc = {
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      planName: `Book Plan for User ${userId}`,
+      userId,
+      targetDate: targetDateStr,
+      sessions,
+      maxDayCount, // included so structure matches the adaptive plan
+    };
+
+    const newRef = await db.collection("adaptive_books").add(planDoc);
+
+    // ---------------------------------------------------------
+    // F) Return the final JSON with the same fields
+    // ---------------------------------------------------------
+    return res.status(200).json({
+      message: "Successfully generated a book-based plan and stored in 'adaptive_books'.",
+      planId: newRef.id,
+      planDoc,
+      sessions,
+      userId,
+      targetDate: targetDateStr,
+      maxDayCount
+    });
+  } catch (error) {
+    logger.error("Error generating book-based plan", error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+function getDaysBetween(startDate, endDate) {
+  const msInDay = 24 * 60 * 60 * 1000;
+  return Math.ceil((endDate - startDate) / msInDay);
+}

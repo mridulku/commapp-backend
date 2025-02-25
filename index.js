@@ -1874,7 +1874,7 @@ app.get("/api/adaptive-plan", async (req, res) => {
     }
 
     // Fetch the plan from the 'adaptive_demo' collection
-    const planRef = db.collection("adaptive_demo").doc(planId);
+    const planRef = db.collection("adaptive_books").doc(planId);
     const planSnap = await planRef.get();
 
     if (!planSnap.exists) {
