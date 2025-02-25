@@ -1,7 +1,3 @@
-/**
- * index.js (Firebase Functions v2 example)
- */
-
 const { onObjectFinalized } = require("firebase-functions/v2/storage");
 const { onDocumentCreated, onDocumentUpdated } = require("firebase-functions/v2/firestore");
 const logger = require("firebase-functions/logger");
@@ -13,41 +9,49 @@ const path = require("path");
 const openaiPackage = require("openai");
 const Configuration = openaiPackage.Configuration;
 const OpenAIApi = openaiPackage.OpenAIApi;
-
 const { onRequest } = require("firebase-functions/v2/https");
-
-
-// Optional token counting
 const { Tiktoken } = require("@dqbd/tiktoken");
 const cl100k = require("@dqbd/tiktoken/encoders/cl100k_base.json");
-
 admin.initializeApp();
 const storage = new Storage();
 
-/**
- * 1) TRIGGER ON PDF UPLOAD (v2 Storage)
- *    - Parse PDF into text (page-wise)
- *    - Create a doc in "pdfExtracts" with metadata
- *    - Create separate docs in "pdfPages" for each page’s text
- */
-/**
- * 1) TRIGGER ON PDF UPLOAD (v2 Storage)
- *    - Parse PDF into paragraphs (using line-splitting + blank-line detection)
- *    - Store concatenated paragraph text in "pdfExtracts"
- */
-/**
- * onPDFUpload
- * -----------
- * - Trigger: onObjectFinalized for a PDF upload in Cloud Storage
- * - Steps:
- *    1) Download the PDF to /tmp
- *    2) Parse it into text
- *    3) Convert lines → paragraphs
- *    4) Create a doc reference in "pdfExtracts" (but do NOT write it yet!)
- *    5) Loop over paragraphs to create docs in "pdfPages"
- *    6) Finally, set the "pdfExtracts" doc (this triggers subsequent logic).
- */
 
+exports.countTokens = onDocumentCreated("pdfExtracts/{docId}", async (event) => {
+  try {
+    const docSnap = event.data;
+    if (!docSnap) {
+      logger.warn("No document snapshot found in event.");
+      return;
+    }
+
+    const data = docSnap.data() || {};
+    const markerText = data.markerText || ""; // we store the combined text under 'markerText'
+
+    if (!markerText) {
+      logger.warn("No 'markerText' to count tokens for.");
+      return;
+    }
+
+    const encoder = new Tiktoken(
+      cl100k.bpe_ranks,
+      cl100k.special_tokens,
+      cl100k.pat_str
+    );
+
+    const tokens = encoder.encode(markerText);
+    const tokenCount = tokens.length;
+    encoder.free();
+
+    logger.info(`Token count for doc ${event.params.docId}: ${tokenCount}`);
+
+    await db.collection("pdfExtracts").doc(event.params.docId).update({
+      tokenCount,
+      tokenCountedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  } catch (error) {
+    logger.error("Error in countTokens:", error);
+  }
+});
 exports.onPDFUpload = onObjectFinalized(async (event) => {
   // These imports are typically at top-level, but shown here for clarity
   const logger = require("firebase-functions/logger");
@@ -157,15 +161,6 @@ exports.onPDFUpload = onObjectFinalized(async (event) => {
     logger.error("Error in onPDFUpload (paragraph-based parsing):", error);
   }
 });
-
-/**
- * 2) TRIGGER ON DOCUMENT CREATION IN "pdfExtracts"
- *    - Fetch all pages from "pdfPages" for this pdfDocId
- *    - Build a single string: "Page 1:\n<Text> ... Page 2:\n<Text> ..."
- *    - Store that combined text in the same doc (pdfExtracts.markerText)
- *    - Call GPT with the combined text, asking for chapters in terms of startPage/endPage
- *    - Store GPT response in "pdfSummaries"
- */
 exports.addMarkersAndSummarize = onDocumentCreated("pdfExtracts/{docId}", async (event) => {
   try {
     const docSnap = event.data;
@@ -268,15 +263,6 @@ ${combinedText}
     logger.error("Error in addMarkersAndSummarize:", error);
   }
 });
-
-/**
- * 3) TRIGGER ON DOCUMENT CREATION IN "pdfSummaries"
- *    - Parse GPT's JSON, which should have an array of chapters: {title, summary, startPage, endPage}
- *    - For each chapter:
- *       (a) Combine the relevant pages' text from pdfPages
- *       (b) Create doc in pdfChapters with that combined text + metadata
- *       (c) Also create doc in chapters_demo referencing the matching book
- */
 exports.segmentChapters = onDocumentCreated("pdfSummaries/{summaryId}", async (event) => {
   try {
     const docSnap = event.data;
@@ -382,54 +368,6 @@ exports.segmentChapters = onDocumentCreated("pdfSummaries/{summaryId}", async (e
     logger.error("Error in segmentChapters function:", error);
   }
 });
-
-/**
- * 4) COUNT TOKENS (Optional)
- *    - Trigger on creation in "pdfExtracts"
- *    - We'll just count tokens of the combined text (markerText), or we could skip
- */
-exports.countTokens = onDocumentCreated("pdfExtracts/{docId}", async (event) => {
-  try {
-    const docSnap = event.data;
-    if (!docSnap) {
-      logger.warn("No document snapshot found in event.");
-      return;
-    }
-
-    const data = docSnap.data() || {};
-    const markerText = data.markerText || ""; // we store the combined text under 'markerText'
-
-    if (!markerText) {
-      logger.warn("No 'markerText' to count tokens for.");
-      return;
-    }
-
-    const encoder = new Tiktoken(
-      cl100k.bpe_ranks,
-      cl100k.special_tokens,
-      cl100k.pat_str
-    );
-
-    const tokens = encoder.encode(markerText);
-    const tokenCount = tokens.length;
-    encoder.free();
-
-    logger.info(`Token count for doc ${event.params.docId}: ${tokenCount}`);
-
-    const db = admin.firestore();
-    await db.collection("pdfExtracts").doc(event.params.docId).update({
-      tokenCount,
-      tokenCountedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-  } catch (error) {
-    logger.error("Error in countTokens:", error);
-  }
-});
-
-/**
- * 5) CREATE A BOOK DOC in "books_demo" whenever "pdfExtracts" doc is created
- *    - This remains largely the same from your original code
- */
 exports.createBookDoc = onDocumentCreated("pdfExtracts/{docId}", async (event) => {
   try {
     const docSnap = event.data;
@@ -484,13 +422,6 @@ exports.createBookDoc = onDocumentCreated("pdfExtracts/{docId}", async (event) =
     logger.error("Error in createBookDoc function:", error);
   }
 });
-
-/**
- * 6) sliceMarkerTextForChapter (KEEP SAME NAME)
- *    - Previously we sliced text by character indexes. Now we already stored the combined text in pdfChapters.
- *    - We’ll just replicate storing "fullText" if needed, or do nothing. 
- *    - For demonstration, we'll “re-confirm” the `fullText` field if not present. 
- */
 exports.sliceMarkerTextForChapter = onDocumentCreated("pdfChapters/{chapterId}", async (event) => {
   try {
     const chapterSnap = event.data;
@@ -515,13 +446,6 @@ exports.sliceMarkerTextForChapter = onDocumentCreated("pdfChapters/{chapterId}",
     logger.error("Error in sliceMarkerTextForChapter:", error);
   }
 });
-
-/**
- * 7) addMarkersToFullText 
- *    - In the old code, we inserted [INDEX=###]. 
- *    - If we still want to do some marker-based chunking for sub-chapters, we can. 
- *    - Or we can skip. Let's keep a minimal approach: we add some dummy markers every 500 chars, as example.
- */
 exports.addMarkersToFullText = onDocumentUpdated("pdfChapters/{chapterId}", async (event) => {
   try {
     const beforeData = event.data.before?.data() || {};
@@ -574,18 +498,6 @@ exports.addMarkersToFullText = onDocumentUpdated("pdfChapters/{chapterId}", asyn
     logger.error("Error in addMarkersToFullText function:", error);
   }
 });
-
-/**
- * 8) summarizeFullTextMarkers
- *    - If we want to chunk sub-chapters, we can pass the newly marked text to GPT for sub-chapter breakdown.
- *    - We'll keep the same logic of storing the GPT response in pdfSubSummaries, referencing pdfChapterId.
- * 
- * 
- * 
- * 
- 
- */
-
 exports.summarizeFullTextMarkers = onDocumentCreated("pdfChapters/{chapterId}", async (event) => {
   try {
     const docSnap = event.data;
@@ -665,14 +577,6 @@ ${markers}
     console.error("Error in summarizeFullTextMarkersOnCreate function:", error);
   }
 });
-
-
-
-/**
- * 9) segmentSubChapters
- *    - On creation in pdfSubSummaries
- *    - Parse GPT's JSON, create docs in pdfSubChapters
- */
 exports.segmentSubChapters = onDocumentCreated("pdfSubSummaries/{subSummaryId}", async (event) => {
   try {
     const docSnap = event.data;
@@ -724,38 +628,6 @@ exports.segmentSubChapters = onDocumentCreated("pdfSubSummaries/{subSummaryId}",
     logger.error("Error in segmentSubChapters function:", error);
   }
 });
-
-/**
- * (NOTE) We re-declare `segmentChapters` at the bottom of your original code, but we've already replaced 
- *        that logic above. Make sure there's no duplication. If you see a duplication error, remove it.
- *        We'll keep just one definition named "segmentChapters".
- */
-
-/**
- * 10) sliceMarkerTextForSubchapter
- *     - In the old code, we used [INDEX=###] to slice from the big markerText. 
- *       Now we do something similar if we want to get the actual text for each sub-chapter.
- */
-/**
- * sliceMarkerTextForSubchapter (page-based)
- * -----------------------------------------
- * Trigger: onDocumentCreated("pdfSubChapters/{subChapterId}")
- * Goal:    Fetch the parent chapter doc → get pdfDocId → query pdfPages
- *          from startPage..endPage and combine them into .fullText
- */
-/**
- * sliceMarkerTextForSubchapter
- * ----------------------------
- * Trigger: onDocumentCreated("pdfSubChapters/{subChapterId}")
- * 
- * 1) We read `pdfChapterId`, `startMarker`, `endMarker` from the new doc.
- * 2) We fetch the parent chapter doc (pdfChapters/{pdfChapterId}) to get pdfDocId (link to pdfPages).
- * 3) We do a range query on pdfPages using `>= startMarker` and `<= endMarker`.
- * 4) We combine all those pages' text into `fullText`.
- * 5) We store `fullText` in the new `pdfSubChapters` doc so that 
- *    subsequent steps can push it to `subchapters_demo`.
- */
-
 exports.sliceMarkerTextForSubchapter = onDocumentCreated(
   "pdfSubChapters/{subChapterId}",
   async (event) => {
@@ -836,12 +708,6 @@ exports.sliceMarkerTextForSubchapter = onDocumentCreated(
     }
   }
 );
-
-/**
- * 11) CREATE Trigger: subChapters -> subchapters_demo
- *     - When a doc is created in pdfSubChapters, we also create one in subchapters_demo 
- *       linked to the parent chapter’s "chapterDemoId".
- */
 exports.createSubChaptersDemoOnCreate = onDocumentCreated(
   "pdfSubChapters/{subChapterId}",
   async (event) => {
@@ -891,10 +757,6 @@ exports.createSubChaptersDemoOnCreate = onDocumentCreated(
     }
   }
 );
-
-
-
-
 exports.repurposeSubChapterWithContext = onDocumentUpdated("pdfSubChapters/{subChapterId}", async (event) => {
   try {
     const beforeData = event.data.before?.data() || {};
@@ -1051,11 +913,6 @@ but ensure it feels like a single continuous passage in an educational text.
     logger.error("Error in repurposeSubChapterWithContext:", err);
   }
 });
-
-
-/**
- * 12) UPDATE Trigger: sync pdfSubChapters.fullText -> subchapters_demo.summary
- */
 exports.updateSubChaptersDemoOnUpdate = onDocumentUpdated(
   "pdfSubChapters/{subChapterId}",
   async (event) => {
@@ -1099,20 +956,14 @@ exports.updateSubChaptersDemoOnUpdate = onDocumentUpdated(
   }
 );
 
-/**
- * A simple helper to count words in a string.
- * Adjust the regex/splitting logic as needed (e.g. ignoring punctuation, etc.)
- */
+/*
+
 function getWordCount(text = "") {
   // Trim and split by any sequence of whitespace.
   // Filter out any empty strings to avoid counting extra.
   const words = text.trim().split(/\s+/).filter(Boolean);
   return words.length;
 }
-
-//*****Code for Adaptive Sessions Creation Logic */
-
-// We'll replicate the numeric-sorting utilities from your React code
 function parseLeadingSections(str) {
   const parts = str.split(".").map((p) => p.trim());
   const result = [];
@@ -1127,7 +978,6 @@ function parseLeadingSections(str) {
   if (result.length === 0) return [Infinity];
   return result;
 }
-
 function compareSections(aSections, bSections) {
   const len = Math.max(aSections.length, bSections.length);
   for (let i = 0; i < len; i++) {
@@ -1139,7 +989,6 @@ function compareSections(aSections, bSections) {
   }
   return 0;
 }
-
 function sortByNameWithNumericAware(items) {
   return items.sort((a, b) => {
     if (!a.name && !b.name) return 0;
@@ -1155,8 +1004,6 @@ function sortByNameWithNumericAware(items) {
     }
   });
 }
-
-// Our main function: fetch the data, build daily sessions, store in `adaptive_demo`.
 exports.generateAdaptivePlan = onRequest(async (req, res) => {
   try {
     // For demonstration, hardcode these. Or pull from req.query, etc.
@@ -1288,5 +1135,429 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
   }
 });
 
+*/
 
-//Ending for code of adaptive sessions//
+
+
+
+
+
+// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// 1) Helper Functions for Sorting
+
+// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// 3) Main Function (V2 HTTP Trigger)
+// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+const db = admin.firestore(); // Assuming you've already initialized admin
+
+
+function parseLeadingSections(str) {
+  const parts = str.split(".").map((p) => p.trim());
+  const result = [];
+  for (let i = 0; i < parts.length; i++) {
+    const maybeNum = parseInt(parts[i], 10);
+    if (!isNaN(maybeNum)) {
+      result.push(maybeNum);
+    } else {
+      break;
+    }
+  }
+  if (result.length === 0) return [Infinity];
+  return result;
+}
+
+function compareSections(aSections, bSections) {
+  const len = Math.max(aSections.length, bSections.length);
+  for (let i = 0; i < len; i++) {
+    const aVal = aSections[i] ?? 0;
+    const bVal = bSections[i] ?? 0;
+    if (aVal !== bVal) {
+      return aVal - bVal;
+    }
+  }
+  return 0;
+}
+
+function sortByNameWithNumericAware(items) {
+  return items.sort((a, b) => {
+    if (!a.name && !b.name) return 0;
+    if (!a.name) return 1;
+    if (!b.name) return -1;
+    const aSections = parseLeadingSections(a.name);
+    const bSections = parseLeadingSections(b.name);
+    const sectionCompare = compareSections(aSections, bSections);
+    if (sectionCompare !== 0) {
+      return sectionCompare;
+    } else {
+      // fallback to standard string compare if numeric is equal
+      return a.name.localeCompare(b.name);
+    }
+  });
+}
+
+/**
+ * Calculate # of days between two dates (rounding up).
+ */
+function getDaysBetween(startDate, endDate) {
+  const msInDay = 24 * 60 * 60 * 1000;
+  return Math.ceil((endDate - startDate) / msInDay);
+}
+
+/**
+ * Expand a subchapter into an ordered array of activities
+ * based on its proficiency.
+ */
+function getActivitiesForSub(sub, wpm) {
+  // possible statuses: "unread" -> [READ, QUIZ, REVISE]
+  //                   "read"   -> [QUIZ, REVISE]
+  //                   "proficient" -> [REVISE]
+  //                   "mastered"   -> []
+  const activities = [];
+  const proficiency = sub.proficiency || "unread";
+
+  // 1) READ
+  if (proficiency === "unread") {
+    const wordCount = sub.wordCount || 0;
+    const minutesNeeded = wordCount > 0 ? (wordCount / wpm) : 0;
+    activities.push({
+      subChapterId: sub.id,
+      type: "READ",
+      timeNeeded: Math.ceil(minutesNeeded), // round up
+    });
+  }
+
+  // 2) QUIZ
+  if (proficiency === "unread" || proficiency === "read") {
+    // fixed 1 minute
+    activities.push({
+      subChapterId: sub.id,
+      type: "QUIZ",
+      timeNeeded: 1,
+    });
+  }
+
+  // 3) REVISE
+  if (
+    proficiency === "unread" ||
+    proficiency === "read" ||
+    proficiency === "proficient"
+  ) {
+    // fixed 1 minute
+    activities.push({
+      subChapterId: sub.id,
+      type: "REVISE",
+      timeNeeded: 1,
+    });
+  }
+
+  return activities;
+}
+
+exports.generateAdaptivePlan = onRequest(async (req, res) => {
+  try {
+    // ---------------------------------------------------------
+    // A) Extract Inputs
+    // ---------------------------------------------------------
+    const userId = req.query.userId || req.body.userId;
+    if (!userId) {
+      return res.status(400).json({
+        error: "Missing userId in request (req.query or req.body).",
+      });
+    }
+
+    // Target date
+    const targetDateStr = req.query.targetDate || req.body.targetDate;
+    if (!targetDateStr) {
+      return res.status(400).json({
+        error: "Missing targetDate in request (req.query or req.body).",
+      });
+    }
+
+    const targetDate = new Date(targetDateStr);
+    if (isNaN(targetDate.getTime())) {
+      return res.status(400).json({
+        error:
+          "Invalid targetDate format. Provide a valid date string (e.g. '2025-07-20').",
+      });
+    }
+
+    // Current date
+    const today = new Date();
+    let maxDayCount = getDaysBetween(today, targetDate);
+    if (maxDayCount < 0) maxDayCount = 0;
+
+    // ---------------------------------------------------------
+    // B) Fetch User Persona -> get wpm, dailyReadingTime
+    // ---------------------------------------------------------
+    const personaDocRef = db.collection("learnerPersonas").doc(userId);
+    const personaDocSnap = await personaDocRef.get();
+
+    if (!personaDocSnap.exists) {
+      return res.status(404).json({
+        error: `No learner persona found for userId: ${userId}`,
+      });
+    }
+
+    const { wpm, dailyReadingTime } = personaDocSnap.data() || {};
+    if (!wpm || !dailyReadingTime) {
+      return res.status(400).json({
+        error: "Persona document must contain 'wpm' and 'dailyReadingTime'.",
+      });
+    }
+
+    // ---------------------------------------------------------
+    // C) Fetch & Sort Books/Chapters/Subchapters
+    // ---------------------------------------------------------
+    const booksSnap = await db.collection("books_demo").get();
+    const booksData = [];
+
+    for (const bookDoc of booksSnap.docs) {
+      const bookId = bookDoc.id;
+      const book = {
+        id: bookId,
+        ...bookDoc.data(),
+      };
+
+      // fetch chapters
+      const chaptersSnap = await db
+        .collection("chapters_demo")
+        .where("bookId", "==", bookId)
+        .get();
+
+      const chaptersData = [];
+      for (const chapterDoc of chaptersSnap.docs) {
+        const chapterId = chapterDoc.id;
+        const chapter = {
+          id: chapterId,
+          ...chapterDoc.data(),
+        };
+
+        // fetch subchapters
+        const subSnap = await db
+          .collection("subchapters_demo")
+          .where("chapterId", "==", chapterId)
+          .get();
+
+        const subData = subSnap.docs.map((d) => ({
+          id: d.id,
+          ...d.data(),
+        }));
+
+        // sort subchapters
+        chapter.subchapters = sortByNameWithNumericAware(subData);
+        chaptersData.push(chapter);
+      }
+
+      // sort chapters
+      book.chapters = sortByNameWithNumericAware(chaptersData);
+      booksData.push(book);
+    }
+
+    // sort books
+    // (If the "book" docs have a "name" field, you could do numeric-aware sorting here)
+    // booksData = sortByNameWithNumericAware(booksData); 
+    // (If needed; depends on your schema. Otherwise, you can keep as is.)
+
+    // ---------------------------------------------------------
+    // D) Generate a Single Ordered Array of Activities
+    // ---------------------------------------------------------
+    // We'll walk through each book -> chapter -> subchapter in sorted order,
+    // expand them into activities, and push them onto one big array.
+
+    const allActivities = [];
+    for (const book of booksData) {
+      if (!book.chapters) continue;
+      for (const chapter of book.chapters) {
+        if (!chapter.subchapters) continue;
+        for (const sub of chapter.subchapters) {
+          // For each subchapter, get READ/QUIZ/REVISE in correct order
+          const subActivities = getActivitiesForSub(sub, wpm);
+
+          // Now we push them in the sequence we got them
+          // This ensures subchapter #1's read->quiz->revise appear together
+          for (const activity of subActivities) {
+            allActivities.push({
+              ...activity,
+              bookId: book.id,
+              chapterId: chapter.id,
+              subChapterName: sub.name || "",
+              // you can store book/chapter names if desired
+            });
+          }
+        }
+      }
+    }
+
+    // Because we walked in sorted order (book->chapter->subchap),
+    // each subchapter's activities appear READ->QUIZ->REVISE. Then we move on.
+
+    // No final global sort needed; we've already ensured the correct sequence.
+
+    // ---------------------------------------------------------
+    // E) Distribute Activities into Days
+    // ---------------------------------------------------------
+    const dailyTimeMins = dailyReadingTime;
+    let dayIndex = 1;
+    let currentDayTime = 0;
+    let currentDayActivities = [];
+    const sessions = [];
+
+    function pushCurrentDay() {
+      if (currentDayActivities.length > 0) {
+        sessions.push({
+          sessionLabel: dayIndex.toString(),
+          activities: [...currentDayActivities],
+        });
+        dayIndex += 1;
+        currentDayTime = 0;
+        currentDayActivities = [];
+      }
+    }
+
+    // now schedule
+    for (let i = 0; i < allActivities.length; i++) {
+      // If we've reached beyond the max day count, decide if we continue or break
+      if (dayIndex > maxDayCount && maxDayCount > 0) {
+        // break if you want to avoid going past the target date,
+        // or just continue scheduling
+        // break;
+      }
+
+      const activity = allActivities[i];
+      if (
+        currentDayTime + activity.timeNeeded > dailyTimeMins &&
+        currentDayTime > 0
+      ) {
+        pushCurrentDay();
+      }
+
+      // add the activity to the current day
+      currentDayActivities.push(activity);
+      currentDayTime += activity.timeNeeded;
+    }
+
+    // leftover in final day
+    if (currentDayActivities.length > 0) {
+      pushCurrentDay();
+    }
+
+    // ---------------------------------------------------------
+    // F) Write Plan to Firestore
+    // ---------------------------------------------------------
+    const planDoc = {
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      planName: `Adaptive Plan for User ${userId}`,
+      userId,
+      targetDate: targetDateStr,
+      sessions,
+      maxDayCount,
+    };
+
+    const newRef = await db.collection("adaptive_demo").add(planDoc);
+
+    // ---------------------------------------------------------
+    // G) Return Success
+    // ---------------------------------------------------------
+    res.status(200).json({
+      message: "Successfully generated an adaptive plan and stored in 'adaptive_demo'.",
+      planId: newRef.id, // So you know the doc ID
+      planDoc,
+    });
+  } catch (error) {
+    logger.error("Error generating adaptive plan", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+
+
+exports.generatePlanStats = onDocumentCreated({
+  document: "adaptive_demo/{planId}"
+}, async (event) => {
+  try {
+    const doc = event.data;
+    if (!doc) {
+      logger.error("No document data in onDocumentCreated trigger.");
+      return;
+    }
+
+    const planData = doc.data();
+    if (!planData.sessions || !Array.isArray(planData.sessions)) {
+      logger.error("No 'sessions' array found in the new plan document.");
+      return;
+    }
+
+    // We'll compute:
+    // 1) totalDays (simply planData.sessions.length)
+    // 2) dayStats = array of daily breakdown
+    //    each dayStats[i] => { dayIndex, totalTime, readingTime, quizTime, reviseTime }
+    // 3) any other aggregates you want
+
+    const dayStats = [];
+    let totalDays = planData.sessions.length;
+
+    for (let i = 0; i < totalDays; i++) {
+      const daySession = planData.sessions[i];
+      const activities = daySession.activities || [];
+
+      let readingTime = 0;
+      let quizTime = 0;
+      let reviseTime = 0;
+      let otherTime = 0; // if you have other activity types in future
+
+      // Sum up times by type
+      for (const activity of activities) {
+        const time = activity.timeNeeded || 0;
+        if (activity.type === "READ") {
+          readingTime += time;
+        } else if (activity.type === "QUIZ") {
+          quizTime += time;
+        } else if (activity.type === "REVISE") {
+          reviseTime += time;
+        } else {
+          otherTime += time;
+        }
+      }
+
+      const totalTime = readingTime + quizTime + reviseTime + otherTime;
+
+      dayStats.push({
+        dayIndex: daySession.sessionLabel, // or parseInt if you prefer a number
+        totalTime,
+        readingTime,
+        quizTime,
+        reviseTime,
+      });
+    }
+
+    // Summaries
+    const totalReadingTime = dayStats.reduce((sum, ds) => sum + ds.readingTime, 0);
+    const totalQuizTime = dayStats.reduce((sum, ds) => sum + ds.quizTime, 0);
+    const totalReviseTime = dayStats.reduce((sum, ds) => sum + ds.reviseTime, 0);
+    const overallTime = totalReadingTime + totalQuizTime + totalReviseTime;
+
+    // Create a stats doc in "adaptive_demo_stats" 
+    // We can reuse the same planId from the path param or create a new random doc ID
+    const planId = event.params.planId; // from {planId} in the path
+    const statsDocRef = db.collection("adaptive_demo_stats").doc(planId);
+
+    const statsPayload = {
+      planId,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      totalDays,
+      overallTime,
+      totalReadingTime,
+      totalQuizTime,
+      totalReviseTime,
+      dayStats
+    };
+
+    await statsDocRef.set(statsPayload);
+
+    logger.info(`Stats generated for planId: ${planId}`, statsPayload);
+  } catch (error) {
+    logger.error("Error in generatePlanStats trigger:", error);
+  }
+});

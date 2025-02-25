@@ -5,16 +5,8 @@ const axios = require("axios");
 const admin = require("firebase-admin");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-
-
 const app = express();
-
-// Debugging the loaded JWT_SECRET
 console.log("JWT_SECRET in use:", process.env.JWT_SECRET); // Add this line
-
-// =======================================
-// CORS CONFIGURATION
-// =======================================
 const corsOptions = {
   // Replace this with your actual Codespaces origin:
   // e.g. "https://abcd-3000.preview.app.github.dev"
@@ -28,34 +20,15 @@ const corsOptions = {
   allowedHeaders: ["Content-Type", "Authorization"],
   credentials: true,
 };
-
-// Use CORS with the above options
 app.use(cors(corsOptions));
-
-// Handle preflight (OPTIONS) requests globally
 app.options("*", cors(corsOptions));
-// =======================================
-
-// Middleware
-// (Note: we do NOT call "app.use(cors())" again because we've already set it above.)
-// app.use(cors());
 app.use(express.json());
-
 const firebaseServiceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT;
-
-// 2. Parse it into an object
 const serviceAccount = JSON.parse(firebaseServiceAccountJson);
-
-
-// Initialize Firebase Admin
-// const serviceAccount = require("./firebase-key.json"); // Ensure this matches the filename of your service account key
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
-
 const db = admin.firestore(); // Firestore database instance
-
-// Middleware to verify JWT token
 function authenticateToken(req, res, next) {
   const token = req.headers["authorization"];
   if (!token) {
@@ -84,26 +57,20 @@ function authenticateToken(req, res, next) {
 }
 
 
-// Basic Route to Test
-app.get("/", (req, res) => {
-  res.send("Backend server is running!");
-});
 
-// Firestore Test Route
-app.get("/test-firestore", async (req, res) => {
-  try {
-    // Add a test document to the "testCollection"
-    await db.collection("testCollection").add({
-      testField: "Hello, Firestore!",
-      timestamp: new Date(),
-    });
+// =======================================
+// ROUTE CATEGORY: GENERAL
+// =======================================
 
-    res.json({ success: true, message: "Data added to Firestore!" });
-  } catch (error) {
-    console.error("Error adding data to Firestore:", error);
-    res.status(500).json({ success: false, error: "Failed to add data" });
-  }
-});
+const rootRoute = require("./routes/rootRoute");
+app.use("/", rootRoute);
+
+
+// =======================================
+// ROUTE CATEGORY: OLD COMM APP PRODUCT
+// =======================================
+
+
 
 // OpenAI Proxy Route with Conversation History Support
 app.post("/api/chat", async (req, res) => {
@@ -148,169 +115,6 @@ app.post("/api/chat", async (req, res) => {
     // Log any errors that occur
     console.error("Error in backend:", error.response?.data || error.message);
     res.status(500).json({ error: "An error occurred while communicating with OpenAI." });
-  }
-});
-
-// Route to fetch all documents from a Firestore collection
-app.get("/get-users", async (req, res) => {
-  try {
-    const usersSnapshot = await db.collection("users").get(); // Replace "users" with your collection name
-    const users = usersSnapshot.docs.map((doc) => ({
-      id: doc.id, // Include the document ID
-      ...doc.data(), // Include the document fields
-    }));
-
-    res.json({ success: true, users });
-  } catch (error) {
-    console.error("Error fetching users:", error);
-    res.status(500).json({ success: false, error: "Failed to fetch users" });
-  }
-});
-
-// Route for user login
-
-app.post("/login", async (req, res) => {
-  const { username, password } = req.body;
-
-  try {
-    // 1) Query Firestore for the user with the given username
-    const usersSnapshot = await db
-      .collection("users")
-      .where("username", "==", username)
-      .limit(1)
-      .get();
-
-    if (usersSnapshot.empty) {
-      return res.status(401).json({ error: "Invalid username or password." });
-    }
-
-    const userDoc = usersSnapshot.docs[0];
-    const userData = userDoc.data();
-
-    // 2) Compare the provided password with the stored (hashed) password
-    const isPasswordValid = await bcrypt.compare(password, userData.password);
-    if (!isPasswordValid) {
-      return res.status(401).json({ error: "Invalid username or password." });
-    }
-
-    // 3) Generate your existing JWT token for the server’s own logic if you want
-    //    (You can skip this if you no longer need a separate token.)
-    const token = jwt.sign(
-      {
-        id: userDoc.id,
-        username: userData.username,
-        role: userData.role,
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: "1h" }
-    );
-
-    // 4) Also create a Firebase Custom Token (using the Admin SDK)
-    //    This is the important piece for letting the front end do signInWithCustomToken().
-    const firebaseCustomToken = await admin
-      .auth()
-      .createCustomToken(userDoc.id, {
-        username: userData.username,
-        role: userData.role,
-      });
-    // The first param is the uid to assign in Firebase Auth
-    // The second param is optional "additional claims"
-
-    // 5) (Optional) Log a timestamp if desired
-    await db.collection("loginTimestamps").add({
-      userId: userDoc.id, // The doc ID of the user
-      username: userData.username,
-      timestamp: new Date(),
-    });
-
-    // 6) Send back success, your original token if you still want it, plus the new firebaseCustomToken
-    res.json({
-      success: true,
-      token, // your existing JWT
-      firebaseCustomToken, // new
-      user: {
-        username: userData.username,
-        role: userData.role,
-        onboardingComplete: userData.onboardingComplete || false,
-        // any other fields you want
-      },
-    });
-  } catch (error) {
-    console.error("Error during login:", error);
-    res.status(500).json({ error: "An error occurred during login." });
-  }
-
-  // For debugging: verify JWT_SECRET is present
-  console.log("JWT_SECRET during signing:", process.env.JWT_SECRET);
-});
-
-// Protected route to fetch the logged-in user's profile
-app.get("/user-profile", authenticateToken, async (req, res) => {
-  try {
-    // Query Firestore by username from the decoded token payload
-    const usersSnapshot = await db
-      .collection("users")
-      .where("username", "==", req.user.username) // Use username
-      .limit(1) // Limit to one user
-      .get();
-
-    if (usersSnapshot.empty) {
-      return res.status(404).json({ error: "User not found." });
-    }
-
-    // Get the first matching document
-    const userDoc = usersSnapshot.docs[0];
-
-    res.json({ success: true, profile: userDoc.data() });
-  } catch (error) {
-    console.error("Error fetching user profile:", error);
-    res.status(500).json({ error: "Failed to fetch user profile." });
-  }
-});
-
-// Protected route to fetch a list of users (admin-only)
-app.get("/all-users", authenticateToken, async (req, res) => {
-  if (req.user.role !== "admin") {
-    return res.status(403).json({ error: "Access denied." });
-  }
-
-  try {
-    const usersSnapshot = await db.collection("users").get();
-    const users = usersSnapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
-
-    res.json({ success: true, users });
-  } catch (error) {
-    console.error("Error fetching users:", error);
-    res.status(500).json({ error: "Failed to fetch users." });
-  }
-});
-
-// ...
-app.post("/complete-onboarding", authenticateToken, async (req, res) => {
-  try {
-    // We'll expect something like { answers: { question1: 3, question2: 5, ... } } in req.body
-    const { answers } = req.body;
-
-    // The token payload (req.user) should contain user.id or user.username
-    // Assuming we stored user id in the token as: { id: userDoc.id, username, role }
-    const userId = req.user.id;
-
-    // Reference to the user's document
-    const userDocRef = db.collection("users").doc(userId);
-
-    // Update onboardingComplete and store answers
-    await userDocRef.update({
-      onboardingComplete: true,
-      answers: answers || {},
-    });
-
-    return res.json({ success: true });
-  } catch (error) {
-    console.error("Error completing onboarding:", error);
-    return res.status(500).json({ error: "Failed to complete onboarding" });
   }
 });
 
@@ -455,104 +259,10 @@ app.post("/api/hint", async (req, res) => {
   }
 });
 
-/*
-
-app.get("/api/books", async (req, res) => {
-  try {
-    // 1. Fetch from the new Firestore collection
-    const snapshot = await db.collection("SubChapterNames").get();
-
-    // 2. Build a nested object: data[book_name][chapter][title] = { summary, serial, start_page, end_page, wordCount }
-    const data = {};
-
-    snapshot.forEach((doc) => {
-      const docData = doc.data();
-      const {
-        bookName,
-        chapter,
-        start_page,
-        end_page,
-        title,
-        serial,
-        description
-      } = docData;
-
-      // Ensure we have top-level object for this book
-      if (!data[bookName]) {
-        data[bookName] = {};
-      }
-
-      // Ensure we have a sub-object for this chapter
-      if (!data[bookName][chapter]) {
-        data[bookName][chapter] = {};
-      }
-
-      // === NEW: compute or retrieve wordCount ===
-      // If you already have docData.wordCount in Firestore, you can use that instead.
-      // E.g.: const wordCount = docData.wordCount || 0
-      // Otherwise, compute from description:
-      const wordCount = description
-        ? description.trim().split(/\s+/).length
-        : 0;
-      // === end new code ===
-
-      // Use "title" as the sub-chapter key
-      data[bookName][chapter][title] = {
-        summary: description, // rename "description" -> "summary" for the viewer
-        serial,
-        start_page,
-        end_page,
-        wordCount  // new field added
-      };
-    });
-
-    // 3. Transform that nested object -> array of { bookName, chapters: [{ chapterName, subChapters }] }
-    const booksArray = Object.keys(data).map((bookName) => ({
-      bookName,
-      chapters: Object.keys(data[bookName]).map((chapterName) => {
-        // Grab all sub-chapter "titles"
-        const subChaptersArr = Object.keys(data[bookName][chapterName]).map((subTitle) => {
-          const item = data[bookName][chapterName][subTitle];
-          return {
-            subChapterName: subTitle,
-            summary: item.summary,
-            serial: item.serial,
-            start_page: item.start_page,
-            end_page: item.end_page,
-            wordCount: item.wordCount // pass through to front end
-          };
-        });
-
-        // Optional: sort subChapters by "serial"
-        subChaptersArr.sort((a, b) => (a.serial || 0) - (b.serial || 0));
-
-        return {
-          chapterName,
-          subChapters: subChaptersArr
-        };
-      })
-    }));
-
-    // 4. Send the final array
-    res.json(booksArray);
-  } catch (error) {
-    console.error("Error fetching books:", error);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-*/
 
 const multer = require("multer");
-
-// If you want to store files in memory (Buffer)
 const upload = multer(); 
-
-// If you prefer writing to disk or a specific folder, you can specify:
-// const upload = multer({ dest: "uploads/" });
-
 const pdfParse = require("pdf-parse");
-
 app.post("/upload-pdf", upload.single("pdfFile"), async (req, res) => {
   try {
     console.log("==> Received /upload-pdf request!");
@@ -621,10 +331,6 @@ app.post("/upload-pdf", upload.single("pdfFile"), async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
-
-// =======================================
-// ROUTE 2: Get unique book names
-// =======================================
 app.get("/api/rawbooks/bookNames", async (req, res) => {
   try {
     const snapshot = await db.collection("RawBooks").get();
@@ -643,10 +349,6 @@ app.get("/api/rawbooks/bookNames", async (req, res) => {
     return res.status(500).json({ success: false, error: error.message });
   }
 });
-
-// =======================================
-// ROUTE 3: Get pages for a given book in range
-// =======================================
 app.get("/api/rawbooks/pages", async (req, res) => {
   try {
     const { bookName, startPage, endPage } = req.query;
@@ -685,9 +387,6 @@ app.get("/api/rawbooks/pages", async (req, res) => {
     return res.status(500).json({ success: false, error: error.message });
   }
 });
-
-
-// In your index.js or similar
 app.post("/api/subChapters", async (req, res) => {
   try {
     // req.body.data should be an array of objects
@@ -727,8 +426,6 @@ app.post("/api/subChapters", async (req, res) => {
     return res.status(500).json({ success: false, error: error.message });
   }
 });
-
-
 app.post("/api/chapters", async (req, res) => {
   try {
     const { data } = req.body;
@@ -764,8 +461,6 @@ app.post("/api/chapters", async (req, res) => {
     return res.status(500).json({ success: false, error: error.message });
   }
 });
-
-// GET /api/chapters?bookName=XYZ
 app.get("/api/chapters", async (req, res) => {
   try {
     const { bookName } = req.query;
@@ -799,224 +494,6 @@ app.get("/api/chapters", async (req, res) => {
     return res.status(500).json({ success: false, error: error.message });
   }
 });
-
-/*
-
-// "complete-subchapter" route
-app.post("/api/complete-subchapter", async (req, res) => {
-  try {
-    // e.g. { userId, bookName, chapterName, subChapterName, done }
-    const { userId, bookName, chapterName, subChapterName, done } = req.body;
-
-    // Up to you how you store it:
-    // e.g. in a "UserProgress" collection
-    await db.collection("UserProgress").doc(`${userId}_${bookName}_${chapterName}_${subChapterName}`)
-      .set({
-        userId,
-        bookName,
-        chapterName,
-        subChapterName,
-        isDone: done,
-        updatedAt: new Date()
-      });
-
-    return res.json({ success: true });
-  } catch (error) {
-    console.error("Error in /complete-subchapter route:", error);
-    return res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-
-
-app.get("/api/user-progress", async (req, res) => {
-  try {
-    const { userId } = req.query;
-    if (!userId) {
-      return res.status(400).json({ success: false, error: "Missing userId" });
-    }
-
-    const snapshot = await db.collection("UserProgress")
-      .where("userId", "==", userId)
-      .get();
-
-    const progress = snapshot.docs.map((doc) => doc.data()); 
-    // each doc: { userId, bookName, chapterName, subChapterName, isDone }
-    
-    res.json({ success: true, progress });
-  } catch (error) {
-    console.error("Error in /api/user-progress:", error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// ==============================================
-// AGGREGATED PROGRESS ROUTE
-// ==============================================
-app.get("/api/books-aggregated", async (req, res) => {
-  try {
-    const { userId } = req.query;
-    if (!userId) {
-      return res
-        .status(400)
-        .json({ success: false, error: "Missing userId in query params." });
-    }
-
-    // 1) Fetch ALL sub-chapter docs from Firestore
-    const subChSnap = await db.collection("SubChapterNames").get();
-    if (subChSnap.empty) {
-      // No sub-chapters at all
-      return res.json({ success: true, data: [] });
-    }
-
-    // 2) Fetch user progress docs for this user
-    //    Each doc: { userId, bookName, chapterName, subChapterName, isDone }
-    const progressSnap = await db
-      .collection("UserProgress")
-      .where("userId", "==", userId)
-      .get();
-
-    // Build a quick lookup: doneSet[bookName][chapterName][subChapterName] = true/false
-    const doneSet = {};
-    progressSnap.forEach((doc) => {
-      const p = doc.data();
-      if (!doneSet[p.bookName]) {
-        doneSet[p.bookName] = {};
-      }
-      if (!doneSet[p.bookName][p.chapterName]) {
-        doneSet[p.bookName][p.chapterName] = {};
-      }
-      // isDone is a boolean; default to false if missing
-      doneSet[p.bookName][p.chapterName][p.subChapterName] = p.isDone || false;
-    });
-
-    // 3) Group sub-chapters in memory as: book -> chapter -> subChapters
-    const booksMap = {}; // { [bookName]: { chaptersMap: { [chapterName]: { subChapters: {} } }, totalWords, totalWordsRead } }
-
-    subChSnap.forEach((doc) => {
-      const data = doc.data();
-      const {
-        bookName,
-        chapter,
-        title, // sub-chapter title
-        description,
-        wordCount,
-      } = data;
-
-      // Book container
-      if (!booksMap[bookName]) {
-        booksMap[bookName] = {
-          bookName,
-          chaptersMap: {},
-          totalWords: 0,
-          totalWordsRead: 0,
-        };
-      }
-
-      // Chapter container
-      if (!booksMap[bookName].chaptersMap[chapter]) {
-        booksMap[bookName].chaptersMap[chapter] = {
-          chapterName: chapter,
-          subChaptersMap: {},
-          totalWords: 0,
-          totalWordsRead: 0,
-        };
-      }
-
-      // Use whatever logic you want to get subChapterName
-      const subChapterName = title;
-
-      // If wordCount is not stored, compute from description:
-      const computedWordCount = wordCount
-        ? wordCount
-        : description
-        ? description.trim().split(/\s+/).length
-        : 0;
-
-      // Check if the user has completed this sub-chapter
-      const isDone =
-        doneSet[bookName]?.[chapter]?.[subChapterName] === true;
-
-      // We consider "wordsRead" fully if isDone, or 0 if not done
-      const wordsRead = isDone ? computedWordCount : 0;
-
-      // Build the sub-chapter entry
-      booksMap[bookName].chaptersMap[chapter].subChaptersMap[subChapterName] = {
-        subChapterName,
-        wordCount: computedWordCount,
-        wordsRead,
-      };
-
-      // Also add to chapter totals
-      booksMap[bookName].chaptersMap[chapter].totalWords += computedWordCount;
-      booksMap[bookName].chaptersMap[chapter].totalWordsRead += wordsRead;
-
-      // Add to book totals
-      booksMap[bookName].totalWords += computedWordCount;
-      booksMap[bookName].totalWordsRead += wordsRead;
-    });
-
-    // 4) Convert booksMap into an array (with nested chapters + subChapters)
-    const finalBooksArr = Object.values(booksMap).map((bookObj) => {
-      const { bookName, chaptersMap, totalWords, totalWordsRead } = bookObj;
-      const bookPct =
-        totalWords > 0 ? (totalWordsRead / totalWords) * 100 : 0;
-
-      const chaptersArr = Object.values(chaptersMap).map((chap) => {
-        const { chapterName, subChaptersMap } = chap;
-        const cPct =
-          chap.totalWords > 0
-            ? (chap.totalWordsRead / chap.totalWords) * 100
-            : 0;
-
-        const subChaptersArr = Object.values(subChaptersMap).map((sub) => {
-          const scPct =
-            sub.wordCount > 0
-              ? (sub.wordsRead / sub.wordCount) * 100
-              : 0;
-          return {
-            subChapterName: sub.subChapterName,
-            wordCount: sub.wordCount,
-            wordsRead: sub.wordsRead,
-            percentageCompleted: scPct,
-          };
-        });
-
-        return {
-          chapterName,
-          totalWords: chap.totalWords,
-          totalWordsRead: chap.totalWordsRead,
-          percentageCompleted: cPct,
-          subChapters: subChaptersArr,
-        };
-      });
-
-      return {
-        bookName,
-        totalWords,
-        totalWordsRead,
-        percentageCompleted: bookPct,
-        chapters: chaptersArr,
-      };
-    });
-
-    return res.json({
-      success: true,
-      data: finalBooksArr,
-    });
-  } catch (error) {
-    console.error("Error in /api/books-aggregated:", error);
-    return res.status(500).json({
-      success: false,
-      error: error.message || "Internal server error",
-    });
-  }
-});
-
-
-*/
-
-// In index.js or routes/subchapters.js
 app.post("/api/subchaptername", async (req, res) => {
   try {
     const { data } = req.body;
@@ -1071,7 +548,6 @@ app.post("/api/subchaptername", async (req, res) => {
   }
 });
 
-// GET /api/subchapters?bookName=XYZ&chapterName=ABC
 app.get("/api/subchapternames", async (req, res) => {
   try {
     const { bookName, chapterName } = req.query;
@@ -1105,15 +581,499 @@ app.get("/api/subchapternames", async (req, res) => {
   }
 });
 
+app.get("/api/user-progress", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Missing userId" });
+    }
+
+    // 1) Get all user progress for this user
+    const userProgressSnap = await db
+      .collection("user_progress_demo")
+      .where("userId", "==", userId)
+      .get();
+
+    if (userProgressSnap.empty) {
+      // No progress found
+      return res.json({ success: true, progress: [] });
+    }
+
+    const progressDocs = userProgressSnap.docs.map((doc) => doc.data());
+
+    // 2) Pre-fetch subchapters, chapters, books
+    const [subChaptersSnap, chaptersSnap, booksSnap] = await Promise.all([
+      db.collection("subchapters_demo").get(),
+      db.collection("chapters_demo").get(),
+      db.collection("books_demo").get(),
+    ]);
+
+    const subChMap = {};
+    subChaptersSnap.forEach((doc) => {
+      subChMap[doc.id] = { ...doc.data(), firestoreId: doc.id };
+    });
+
+    const chaptersMap = {};
+    chaptersSnap.forEach((doc) => {
+      chaptersMap[doc.id] = { ...doc.data(), firestoreId: doc.id };
+    });
+
+    const booksMap = {};
+    booksSnap.forEach((doc) => {
+      booksMap[doc.id] = { ...doc.data(), firestoreId: doc.id };
+    });
+
+    // 3) Build the result
+    const result = [];
+    for (const pd of progressDocs) {
+      const { userId, subChapterId, isDone } = pd;
+      const subChDoc = subChMap[subChapterId];
+      if (!subChDoc) continue;
+
+      const chapterDoc = chaptersMap[subChDoc.chapterId];
+      if (!chapterDoc) continue;
+
+      const bookDoc = booksMap[chapterDoc.bookId];
+      if (!bookDoc) continue;
+
+      result.push({
+        userId,
+        bookName: bookDoc.name,
+        chapterName: chapterDoc.name,
+        subChapterName: subChDoc.name,
+        isDone: isDone,
+      });
+    }
+
+    return res.json({ success: true, progress: result });
+  } catch (error) {
+    console.error("Error in /api/user-progress:", error);
+    return res
+      .status(500)
+      .json({ success: false, error: error.message });
+  }
+});
+
+// =======================================
+// ROUTE CATEGORY: LOGIN
+// =======================================
+
+
+app.post("/login", async (req, res) => {
+  const { username, password } = req.body;
+
+  try {
+    // 1) Query Firestore for the user with the given username
+    const usersSnapshot = await db
+      .collection("users")
+      .where("username", "==", username)
+      .limit(1)
+      .get();
+
+    if (usersSnapshot.empty) {
+      return res.status(401).json({ error: "Invalid username or password." });
+    }
+
+    const userDoc = usersSnapshot.docs[0];
+    const userData = userDoc.data();
+
+    // 2) Compare the provided password with the stored (hashed) password
+    const isPasswordValid = await bcrypt.compare(password, userData.password);
+    if (!isPasswordValid) {
+      return res.status(401).json({ error: "Invalid username or password." });
+    }
+
+    // 3) Generate your existing JWT token for the server’s own logic if you want
+    //    (You can skip this if you no longer need a separate token.)
+    const token = jwt.sign(
+      {
+        id: userDoc.id,
+        username: userData.username,
+        role: userData.role,
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+
+    // 4) Also create a Firebase Custom Token (using the Admin SDK)
+    //    This is the important piece for letting the front end do signInWithCustomToken().
+    const firebaseCustomToken = await admin
+      .auth()
+      .createCustomToken(userDoc.id, {
+        username: userData.username,
+        role: userData.role,
+      });
+    // The first param is the uid to assign in Firebase Auth
+    // The second param is optional "additional claims"
+
+    // 5) (Optional) Log a timestamp if desired
+    await db.collection("loginTimestamps").add({
+      userId: userDoc.id, // The doc ID of the user
+      username: userData.username,
+      timestamp: new Date(),
+    });
+
+    // 6) Send back success, your original token if you still want it, plus the new firebaseCustomToken
+    res.json({
+      success: true,
+      token, // your existing JWT
+      firebaseCustomToken, // new
+      user: {
+        username: userData.username,
+        role: userData.role,
+        onboardingComplete: userData.onboardingComplete || false,
+        // any other fields you want
+      },
+    });
+  } catch (error) {
+    console.error("Error during login:", error);
+    res.status(500).json({ error: "An error occurred during login." });
+  }
+
+  // For debugging: verify JWT_SECRET is present
+  console.log("JWT_SECRET during signing:", process.env.JWT_SECRET);
+});
 
 
 
-/*
-  ----------------------------------------------------------
-  1) GET /api/categories 
-  -> returns all categories sorted by name
-  ----------------------------------------------------------
-*/
+// =======================================
+// ROUTE CATEGORY: ONBOARDING
+// =======================================
+
+
+
+app.post("/complete-onboarding", authenticateToken, async (req, res) => {
+  try {
+    // We'll expect something like { answers: { question1: 3, question2: 5, ... } } in req.body
+    const { answers } = req.body;
+
+    // The token payload (req.user) should contain user.id or user.username
+    // Assuming we stored user id in the token as: { id: userDoc.id, username, role }
+    const userId = req.user.id;
+
+    // Reference to the user's document
+    const userDocRef = db.collection("users").doc(userId);
+
+    // Update onboardingComplete and store answers
+    await userDocRef.update({
+      onboardingComplete: true,
+      answers: answers || {},
+    });
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("Error completing onboarding:", error);
+    return res.status(500).json({ error: "Failed to complete onboarding" });
+  }
+});
+app.post("/api/learnerpersona", authenticateToken, async (req, res) => {
+  
+  console.log("Inside learnerpersona route");
+
+  
+  try {
+    const { category, answers } = req.body;
+    const { id, username } = req.user || {};
+
+    if (!id && !username) {
+      return res.status(400).json({
+        success: false,
+        error: "No user identifier in token.",
+      });
+    }
+
+    // Find user doc in Firestore
+    let userDocId = null;
+    const docRefById = db.collection("users").doc(id);
+    const docSnapById = await docRefById.get();
+
+    if (docSnapById.exists) {
+      userDocId = id;
+    } else {
+      const snapshot = await db
+        .collection("users")
+        .where("username", "==", username)
+        .get();
+
+      if (snapshot.empty) {
+        return res
+          .status(404)
+          .json({ success: false, error: "User not found in Firestore." });
+      }
+
+      userDocId = snapshot.docs[0].id;
+    }
+
+    // Mark onboardingComplete
+    await db.collection("users").doc(userDocId).update({
+      onboardingComplete: true,
+    });
+
+    // Create a record in "learnerPersonas"
+    const newDocRef = await db.collection("learnerPersonas").add({
+      userId: userDocId,
+      category,
+      answers,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "User onboarding complete and form data stored.",
+    });
+  } catch (error) {
+    console.error("Error in /api/learnerpersona route:", error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || "Internal server error",
+    });
+  }
+});
+app.get("/api/learner-personas", async (req, res) => {
+  try {
+    const userId = req.query.userId;
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing userId in query params.",
+      });
+    }
+
+    // Pseudocode: read from Firestore, Mongo, or wherever you're storing learnerPersonas
+    // Example with Firestore (adjust to your DB):
+    // const docRef = db.collection("learnerPersonas").doc(userId);
+    // const doc = await docRef.get();
+
+    // Example with Mongoose or any other DB
+    // const doc = await LearnerPersonaModel.findOne({ userId });
+
+    // For demonstration, let's pretend we found a doc with isOnboarded = true
+    const doc = {
+      userId: userId,
+      isOnboarded: true, // or false, depends on your DB
+    };
+
+    if (!doc) {
+      return res.status(404).json({
+        success: false,
+        error: "No learnerPersona found for this user.",
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        isOnboarded: doc.isOnboarded,
+      },
+    });
+  } catch (err) {
+    console.error("Error fetching learnerPersona:", err);
+    res.status(500).json({
+      success: false,
+      error: "Server error fetching learnerPersona.",
+    });
+  }
+});
+app.post("/onboardingassessment", authenticateToken, async (req, res) => {
+  try {
+    const assessmentData = req.body;
+    // attach userId from the token
+    assessmentData.userId = req.user.id || null;
+
+    // Save to Firestore (or your DB)
+    const docRef = await db.collection("onboardingAssessments").add(assessmentData);
+
+    return res.status(200).json({
+      success: true,
+      message: "Assessment data saved successfully!",
+      docId: docRef.id,
+    });
+  } catch (error) {
+    console.error("Error saving assessment data:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to save assessment data",
+      error: error.message,
+    });
+  }
+});
+
+
+// =======================================
+// ROUTE CATEGORY: WIDGET ONBOARDING
+// =======================================
+
+app.get("/api/learner-goal", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing userId query parameter.",
+      });
+    }
+
+    // We'll query the collection e.g. "learner_personas" for docs where userId == ...
+    const snapshot = await db
+      .collection("learnerPersonas") // or your actual collection name
+      .where("userId", "==", userId)
+      .limit(1)
+      .get();
+
+    if (snapshot.empty) {
+      // No doc for this user
+      return res.json({
+        success: true,
+        data: null, // or { preparationGoal: null }
+      });
+    }
+
+    // Grab the first doc
+    const doc = snapshot.docs[0];
+    const docData = doc.data();
+
+    // "answers" is a map, we want answers.preparationGoal
+    const preparationGoal = docData.answers?.preparationGoal || null;
+
+    return res.json({
+      success: true,
+      data: {
+        preparationGoal,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching learner goal:", error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || "Internal server error",
+    });
+  }
+});
+app.get("/api/reading-speed", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing userId query parameter.",
+      });
+    }
+
+    // We'll query "onboarding_assessments" for the user
+    const snapshot = await db
+      .collection("onboardingAssessments") // or your actual collection name
+      .where("userId", "==", userId)
+      .limit(1)
+      .get();
+
+    if (snapshot.empty) {
+      return res.json({
+        success: true,
+        data: null,
+      });
+    }
+
+    const doc = snapshot.docs[0];
+    const docData = doc.data();
+
+    // The field is named readingTimeSec (the total # of seconds?)
+    // Possibly you'd convert it to WPM if you want, but let's just return it as is.
+    const readingTimeSec = docData.readingTimeSec || null;
+
+    return res.json({
+      success: true,
+      data: {
+        readingTimeSec,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching reading speed:", error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || "Internal server error",
+    });
+  }
+});
+app.get("/api/has-read-first-subchapter", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing userId query parameter."
+      });
+    }
+
+    // Query user_activities_demo where userId == ... AND eventType == "stopReading"
+    // If we find at least one doc, user has read a subchapter
+    const snapshot = await db
+      .collection("user_activities_demo")
+      .where("userId", "==", userId)
+      .where("eventType", "==", "stopReading")
+      .limit(1)
+      .get();
+
+    const hasReadFirstSubchapter = !snapshot.empty;
+
+    return res.json({
+      success: true,
+      data: {
+        hasReadFirstSubchapter
+      }
+    });
+  } catch (error) {
+    console.error("Error in /api/has-read-first-subchapter:", error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || "Internal server error"
+    });
+  }
+});
+app.get("/api/has-completed-quiz", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing userId query parameter."
+      });
+    }
+
+    // Query user_activities_demo where userId == ... AND eventType == "quizCompleted"
+    // If we find at least one doc, user has completed a quiz
+    const snapshot = await db
+      .collection("user_activities_demo")
+      .where("userId", "==", userId)
+      .where("eventType", "==", "quizCompleted")
+      .limit(1)
+      .get();
+
+    const hasCompletedQuiz = !snapshot.empty;
+
+    return res.json({
+      success: true,
+      data: {
+        hasCompletedQuiz
+      }
+    });
+  } catch (error) {
+    console.error("Error in /api/has-completed-quiz:", error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || "Internal server error"
+    });
+  }
+});
+
+
+
+// =======================================
+// ROUTE CATEGORY: BOOKS AGGREGATION
+// =======================================
+
+
 app.get("/api/categories", async (req, res) => {
   try {
     const snapshot = await db.collection("categories_demo").get();
@@ -1134,15 +1094,6 @@ app.get("/api/categories", async (req, res) => {
     return res.status(500).json({ success: false, error: error.message });
   }
 });
-
-/*
-  ----------------------------------------------------------
-  2) GET /api/books?categoryId=...
-  -> returns an array of books (with nested chapters & subChapters)
-     optionally filtered by categoryId
-  -> also sorts books, chapters, subChapters in alphabetical order
-  ----------------------------------------------------------
-*/
 app.get("/api/books", async (req, res) => {
   try {
     // Extract categoryId and userId from query params
@@ -1356,96 +1307,6 @@ app.get("/api/books", async (req, res) => {
     return res.status(500).json({ error: "Internal server error" });
   }
 });
-
-/*
-  ----------------------------------------------------------
-  3) GET /api/user-progress?userId=...
-  -> returns array of { userId, bookName, chapterName, subChapterName, isDone }
-  ----------------------------------------------------------
-*/
-app.get("/api/user-progress", async (req, res) => {
-  try {
-    const { userId } = req.query;
-    if (!userId) {
-      return res
-        .status(400)
-        .json({ success: false, error: "Missing userId" });
-    }
-
-    // 1) Get all user progress for this user
-    const userProgressSnap = await db
-      .collection("user_progress_demo")
-      .where("userId", "==", userId)
-      .get();
-
-    if (userProgressSnap.empty) {
-      // No progress found
-      return res.json({ success: true, progress: [] });
-    }
-
-    const progressDocs = userProgressSnap.docs.map((doc) => doc.data());
-
-    // 2) Pre-fetch subchapters, chapters, books
-    const [subChaptersSnap, chaptersSnap, booksSnap] = await Promise.all([
-      db.collection("subchapters_demo").get(),
-      db.collection("chapters_demo").get(),
-      db.collection("books_demo").get(),
-    ]);
-
-    const subChMap = {};
-    subChaptersSnap.forEach((doc) => {
-      subChMap[doc.id] = { ...doc.data(), firestoreId: doc.id };
-    });
-
-    const chaptersMap = {};
-    chaptersSnap.forEach((doc) => {
-      chaptersMap[doc.id] = { ...doc.data(), firestoreId: doc.id };
-    });
-
-    const booksMap = {};
-    booksSnap.forEach((doc) => {
-      booksMap[doc.id] = { ...doc.data(), firestoreId: doc.id };
-    });
-
-    // 3) Build the result
-    const result = [];
-    for (const pd of progressDocs) {
-      const { userId, subChapterId, isDone } = pd;
-      const subChDoc = subChMap[subChapterId];
-      if (!subChDoc) continue;
-
-      const chapterDoc = chaptersMap[subChDoc.chapterId];
-      if (!chapterDoc) continue;
-
-      const bookDoc = booksMap[chapterDoc.bookId];
-      if (!bookDoc) continue;
-
-      result.push({
-        userId,
-        bookName: bookDoc.name,
-        chapterName: chapterDoc.name,
-        subChapterName: subChDoc.name,
-        isDone: isDone,
-      });
-    }
-
-    return res.json({ success: true, progress: result });
-  } catch (error) {
-    console.error("Error in /api/user-progress:", error);
-    return res
-      .status(500)
-      .json({ success: false, error: error.message });
-  }
-});
-
-/*
-  ----------------------------------------------------------
-  4) GET /api/books-aggregated?userId=...&categoryId=...
-  -> aggregator that shows totalWords, totalWordsRead, etc.
-     (optionally filtered by categoryId)
-  -> also sorts books, chapters, subChapters alphabetically
-  ----------------------------------------------------------
-*/
 app.get("/api/books-aggregated", async (req, res) => {
   try {
     const { userId, categoryId } = req.query;
@@ -1650,13 +1511,122 @@ app.get("/api/books-aggregated", async (req, res) => {
       .json({ success: false, error: error.message || "Internal server error" });
   }
 });
-/*
-  ----------------------------------------------------------
-  5) POST /api/complete-subchapter
-  -> same logic as before, name-based lookups to find IDs, 
-     then upsert user_progress_demo
-  ----------------------------------------------------------
-*/
+app.get("/api/user-book", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Missing userId query parameter." });
+    }
+
+    // We want the first or most recent book. Let's assume "createdAt" is a Firestore Timestamp
+    // We'll order by "createdAt" descending and limit(1).
+    const booksRef = db.collection("books_demo");
+    const query = booksRef
+      .where("userId", "==", userId)
+      .orderBy("createdAt", "desc")
+      .limit(1);
+
+    const snapshot = await query.get();
+
+    if (snapshot.empty) {
+      // No books for this user
+      return res.json({
+        success: true,
+        data: null, // or an empty object
+      });
+    }
+
+    // Grab the first doc
+    const doc = snapshot.docs[0];
+    const docData = doc.data();
+    // Convert "createdAt" if needed
+    let createdAtISO = null;
+    if (docData.createdAt) {
+      createdAtISO = docData.createdAt.toDate().toISOString();
+    }
+
+    // Return minimal info or the full doc
+    return res.json({
+      success: true,
+      data: {
+        bookId: doc.id,
+        name: docData.name,
+        userId: docData.userId,
+        categoryId: docData.categoryId || null,
+        createdAt: createdAtISO,
+      },
+    });
+  } catch (err) {
+    console.error("Error in GET /api/user-book:", err);
+    return res.status(500).json({
+      success: false,
+      error: err.message || "Internal server error",
+    });
+  }
+});
+app.get("/api/books-structure", async (req, res) => {
+  try {
+    // 1. Fetch all books
+    const booksSnapshot = await db.collection("books_demo").get();
+    const booksData = [];
+
+    for (const bookDoc of booksSnapshot.docs) {
+      const bookId = bookDoc.id;
+      const book = {
+        id: bookId,
+        ...bookDoc.data(),
+      };
+
+      // 2. Fetch all chapters for this book
+      const chaptersSnapshot = await db
+        .collection("chapters_demo")
+        .where("bookId", "==", bookId)
+        .get();
+
+      const chaptersData = [];
+      for (const chapterDoc of chaptersSnapshot.docs) {
+        const chapterId = chapterDoc.id;
+        const chapter = {
+          id: chapterId,
+          ...chapterDoc.data(),
+        };
+
+        // 3. Fetch all subchapters for this chapter
+        const subchaptersSnapshot = await db
+          .collection("subchapters_demo")
+          .where("chapterId", "==", chapterId)
+          .get();
+
+        const subchaptersData = subchaptersSnapshot.docs.map((subDoc) => ({
+          id: subDoc.id,
+          ...subDoc.data(),
+        }));
+
+        // Attach subchapters to the chapter
+        chapter.subchapters = subchaptersData;
+        chaptersData.push(chapter);
+      }
+
+      // Attach chapters to the book
+      book.chapters = chaptersData;
+      booksData.push(book);
+    }
+
+    // 4. Return nested structure
+    return res.status(200).json(booksData);
+  } catch (error) {
+    console.error("Error fetching book structure:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// =======================================
+// ROUTE CATEGORY: SUBCHAPTER SPECFIC
+// =======================================
+
+
 app.post("/api/complete-subchapter", async (req, res) => {
   try {
     const {
@@ -1714,13 +1684,10 @@ app.post("/api/complete-subchapter", async (req, res) => {
 });
 
 
-/*******************************************
- * GET /api/quizzes?bookName=...&chapterName=...&subChapterName=...
- * Returns quiz data for the specified subchapter.
- * If no quiz doc is found, returns an empty array.
- *******************************************/
 
-// server.js or index.js (wherever your Express app is defined)
+// =======================================
+// ROUTE CATEGORY: QUIZ
+// =======================================
 
 app.post("/api/quizzes", async (req, res) => {
   try {
@@ -1768,228 +1735,51 @@ app.post("/api/quizzes", async (req, res) => {
     return res.status(500).json({ error: "Internal server error" });
   }
 });
-
-
-
-// No major changes needed here. The "answers" now contains pdfLink for each course.
-
-app.post("/api/learnerpersona", authenticateToken, async (req, res) => {
-  
-  console.log("Inside learnerpersona route");
-
-  
+app.get("/api/quizzes", async (req, res) => {
   try {
-    const { category, answers } = req.body;
-    const { id, username } = req.user || {};
+    const { userId, subChapterId } = req.query;
+    if (!userId || !subChapterId) {
+      return res.status(400).json({ success: false, error: "Missing userId or subChapterId" });
+    }
 
-    if (!id && !username) {
-      return res.status(400).json({
+    // Query Firestore for the MOST RECENT doc matching userId + subChapterId
+    // by ordering 'createdAt' descending, then limiting to 1
+    const quizzesRef = db.collection("quizzes_demo");
+    const snapshot = await quizzesRef
+      .where("userId", "==", userId)
+      .where("subChapterId", "==", subChapterId)
+      .orderBy("createdAt", "desc")
+      .limit(1)
+      .get();
+
+    if (snapshot.empty) {
+      // No existing quiz
+      return res.json({
         success: false,
-        error: "No user identifier in token.",
+        message: "No quiz found for this subChapterId & user."
       });
     }
 
-    // Find user doc in Firestore
-    let userDocId = null;
-    const docRefById = db.collection("users").doc(id);
-    const docSnapById = await docRefById.get();
+    // Grab the first (and only) doc from this query
+    const doc = snapshot.docs[0];
+    const data = doc.data();
 
-    if (docSnapById.exists) {
-      userDocId = id;
-    } else {
-      const snapshot = await db
-        .collection("users")
-        .where("username", "==", username)
-        .get();
-
-      if (snapshot.empty) {
-        return res
-          .status(404)
-          .json({ success: false, error: "User not found in Firestore." });
-      }
-
-      userDocId = snapshot.docs[0].id;
-    }
-
-    // Mark onboardingComplete
-    await db.collection("users").doc(userDocId).update({
-      onboardingComplete: true,
-    });
-
-    // Create a record in "learnerPersonas"
-    const newDocRef = await db.collection("learnerPersonas").add({
-      userId: userDocId,
-      category,
-      answers,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    return res.status(200).json({
-      success: true,
-      message: "User onboarding complete and form data stored.",
-    });
-  } catch (error) {
-    console.error("Error in /api/learnerpersona route:", error);
-    return res.status(500).json({
-      success: false,
-      error: error.message || "Internal server error",
-    });
-  }
-});
-
-
-// In your Express server app.js (or router file), for example:
-app.get("/api/learner-personas", async (req, res) => {
-  try {
-    const userId = req.query.userId;
-    if (!userId) {
-      return res.status(400).json({
-        success: false,
-        error: "Missing userId in query params.",
-      });
-    }
-
-    // Pseudocode: read from Firestore, Mongo, or wherever you're storing learnerPersonas
-    // Example with Firestore (adjust to your DB):
-    // const docRef = db.collection("learnerPersonas").doc(userId);
-    // const doc = await docRef.get();
-
-    // Example with Mongoose or any other DB
-    // const doc = await LearnerPersonaModel.findOne({ userId });
-
-    // For demonstration, let's pretend we found a doc with isOnboarded = true
-    const doc = {
-      userId: userId,
-      isOnboarded: true, // or false, depends on your DB
-    };
-
-    if (!doc) {
-      return res.status(404).json({
-        success: false,
-        error: "No learnerPersona found for this user.",
-      });
-    }
-
-    res.json({
-      success: true,
-      data: {
-        isOnboarded: doc.isOnboarded,
-      },
-    });
+    // Return the doc data
+    return res.json({ success: true, data });
   } catch (err) {
-    console.error("Error fetching learnerPersona:", err);
-    res.status(500).json({
-      success: false,
-      error: "Server error fetching learnerPersona.",
-    });
-  }
-});
-
-
-// Add this route to your index.js file (or wherever you define routes)
-// e.g., right below "app.get('/test-firestore', ...)" block:
-
-// ------------- Your Onboarding Route -------------
-app.post("/onboardingassessment", authenticateToken, async (req, res) => {
-  try {
-    const assessmentData = req.body;
-    // attach userId from the token
-    assessmentData.userId = req.user.id || null;
-
-    // Save to Firestore (or your DB)
-    const docRef = await db.collection("onboardingAssessments").add(assessmentData);
-
-    return res.status(200).json({
-      success: true,
-      message: "Assessment data saved successfully!",
-      docId: docRef.id,
-    });
-  } catch (error) {
-    console.error("Error saving assessment data:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to save assessment data",
-      error: error.message,
-    });
+    console.error("Error fetching quiz:", err);
+    return res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
 
 
 
-/*
-  Add your app.listen(...) here, for example:
-*/
-// const PORT = 3001;
-// app.listen(PORT, () => {
-//   console.log(`Server running on port ${PORT}`);
-// });
 
 
+// =======================================
+// ROUTE CATEGORY: USER ACTIVITY
+// =======================================
 
-// ===================================================
-// ROUTE: FETCH NESTED BOOKS → CHAPTERS → SUBCHAPTERS
-// ===================================================
-// If you only want authorized users to see this, you could add `authenticateToken`
-// as middleware: app.get("/api/books-structure", authenticateToken, async ...)
-app.get("/api/books-structure", async (req, res) => {
-  try {
-    // 1. Fetch all books
-    const booksSnapshot = await db.collection("books_demo").get();
-    const booksData = [];
-
-    for (const bookDoc of booksSnapshot.docs) {
-      const bookId = bookDoc.id;
-      const book = {
-        id: bookId,
-        ...bookDoc.data(),
-      };
-
-      // 2. Fetch all chapters for this book
-      const chaptersSnapshot = await db
-        .collection("chapters_demo")
-        .where("bookId", "==", bookId)
-        .get();
-
-      const chaptersData = [];
-      for (const chapterDoc of chaptersSnapshot.docs) {
-        const chapterId = chapterDoc.id;
-        const chapter = {
-          id: chapterId,
-          ...chapterDoc.data(),
-        };
-
-        // 3. Fetch all subchapters for this chapter
-        const subchaptersSnapshot = await db
-          .collection("subchapters_demo")
-          .where("chapterId", "==", chapterId)
-          .get();
-
-        const subchaptersData = subchaptersSnapshot.docs.map((subDoc) => ({
-          id: subDoc.id,
-          ...subDoc.data(),
-        }));
-
-        // Attach subchapters to the chapter
-        chapter.subchapters = subchaptersData;
-        chaptersData.push(chapter);
-      }
-
-      // Attach chapters to the book
-      book.chapters = chaptersData;
-      booksData.push(book);
-    }
-
-    // 4. Return nested structure
-    return res.status(200).json(booksData);
-  } catch (error) {
-    console.error("Error fetching book structure:", error);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-
-
-// POST /api/user-activities
 app.post("/api/user-activities", async (req, res) => {
   try {
     const { userId, subChapterId, eventType, timestamp } = req.body;
@@ -2019,10 +1809,6 @@ app.post("/api/user-activities", async (req, res) => {
       .json({ success: false, error: error.message || "Internal server error" });
   }
 });
-
-
-
-// GET /api/user-activities?userId=123
 app.get("/api/user-activities", async (req, res) => {
   try {
     const { userId } = req.query;
@@ -2077,305 +1863,102 @@ app.get("/api/user-activities", async (req, res) => {
 
 
 
-// GET /api/user-book?userId=xxx
-app.get("/api/user-book", async (req, res) => {
+
+
+app.get("/api/adaptive-plan", async (req, res) => {
   try {
-    const { userId } = req.query;
-    if (!userId) {
-      return res
-        .status(400)
-        .json({ success: false, error: "Missing userId query parameter." });
+    const { planId } = req.query;
+
+    if (!planId) {
+      return res.status(400).json({ error: "Missing 'planId' in query params" });
     }
 
-    // We want the first or most recent book. Let's assume "createdAt" is a Firestore Timestamp
-    // We'll order by "createdAt" descending and limit(1).
-    const booksRef = db.collection("books_demo");
-    const query = booksRef
-      .where("userId", "==", userId)
-      .orderBy("createdAt", "desc")
-      .limit(1);
+    // Fetch the plan from the 'adaptive_demo' collection
+    const planRef = db.collection("adaptive_demo").doc(planId);
+    const planSnap = await planRef.get();
 
-    const snapshot = await query.get();
-
-    if (snapshot.empty) {
-      // No books for this user
-      return res.json({
-        success: true,
-        data: null, // or an empty object
-      });
+    if (!planSnap.exists) {
+      return res.status(404).json({ error: `Plan document ${planId} not found` });
     }
-
-    // Grab the first doc
-    const doc = snapshot.docs[0];
-    const docData = doc.data();
-    // Convert "createdAt" if needed
-    let createdAtISO = null;
-    if (docData.createdAt) {
-      createdAtISO = docData.createdAt.toDate().toISOString();
-    }
-
-    // Return minimal info or the full doc
-    return res.json({
-      success: true,
-      data: {
-        bookId: doc.id,
-        name: docData.name,
-        userId: docData.userId,
-        categoryId: docData.categoryId || null,
-        createdAt: createdAtISO,
-      },
-    });
-  } catch (err) {
-    console.error("Error in GET /api/user-book:", err);
-    return res.status(500).json({
-      success: false,
-      error: err.message || "Internal server error",
-    });
-  }
-});
-
-
-
-
-// server.js or wherever you define your Express routes
-
-app.get("/api/quizzes", async (req, res) => {
-  try {
-    const { userId, subChapterId } = req.query;
-    if (!userId || !subChapterId) {
-      return res.status(400).json({ success: false, error: "Missing userId or subChapterId" });
-    }
-
-    // Query Firestore for the MOST RECENT doc matching userId + subChapterId
-    // by ordering 'createdAt' descending, then limiting to 1
-    const quizzesRef = db.collection("quizzes_demo");
-    const snapshot = await quizzesRef
-      .where("userId", "==", userId)
-      .where("subChapterId", "==", subChapterId)
-      .orderBy("createdAt", "desc")
-      .limit(1)
-      .get();
-
-    if (snapshot.empty) {
-      // No existing quiz
-      return res.json({
-        success: false,
-        message: "No quiz found for this subChapterId & user."
-      });
-    }
-
-    // Grab the first (and only) doc from this query
-    const doc = snapshot.docs[0];
-    const data = doc.data();
 
     // Return the doc data
-    return res.json({ success: true, data });
-  } catch (err) {
-    console.error("Error fetching quiz:", err);
-    return res.status(500).json({ success: false, error: "Internal server error" });
-  }
-});
-
-
-// server/app.js (or your main Express file)
-app.get("/api/learner-goal", async (req, res) => {
-  try {
-    const { userId } = req.query;
-    if (!userId) {
-      return res.status(400).json({
-        success: false,
-        error: "Missing userId query parameter.",
-      });
-    }
-
-    // We'll query the collection e.g. "learner_personas" for docs where userId == ...
-    const snapshot = await db
-      .collection("learnerPersonas") // or your actual collection name
-      .where("userId", "==", userId)
-      .limit(1)
-      .get();
-
-    if (snapshot.empty) {
-      // No doc for this user
-      return res.json({
-        success: true,
-        data: null, // or { preparationGoal: null }
-      });
-    }
-
-    // Grab the first doc
-    const doc = snapshot.docs[0];
-    const docData = doc.data();
-
-    // "answers" is a map, we want answers.preparationGoal
-    const preparationGoal = docData.answers?.preparationGoal || null;
-
-    return res.json({
-      success: true,
-      data: {
-        preparationGoal,
-      },
-    });
+    const planData = planSnap.data();
+    return res.json({ planDoc: planData });
   } catch (error) {
-    console.error("Error fetching learner goal:", error);
-    return res.status(500).json({
-      success: false,
-      error: error.message || "Internal server error",
-    });
+    logger.error("Error fetching adaptive plan:", error);
+    return res.status(500).json({ error: error.message });
   }
 });
 
 
 
-app.get("/api/reading-speed", async (req, res) => {
+
+
+
+// Assuming you already have:
+// const app = express(); // your Express app
+// const db = admin.firestore(); // your Firestore reference
+// app.use(cors({ origin: true }));
+
+app.get("/api/subchapters/:id", async (req, res) => {
   try {
-    const { userId } = req.query;
-    if (!userId) {
-      return res.status(400).json({
-        success: false,
-        error: "Missing userId query parameter.",
+    const subChapterId = req.params.id;
+    console.log("Fetching subchapter document:", subChapterId);
+
+    // 1) Read the document from subchapters_demo
+    const docRef = db.collection("subchapters_demo").doc(subChapterId);
+    const docSnap = await docRef.get();
+
+    if (!docSnap.exists) {
+      // If not found, return 404
+      return res.status(404).json({
+        error: `Subchapter '${subChapterId}' not found in 'subchapters_demo'.`
       });
     }
 
-    // We'll query "onboarding_assessments" for the user
-    const snapshot = await db
-      .collection("onboardingAssessments") // or your actual collection name
-      .where("userId", "==", userId)
-      .limit(1)
-      .get();
+    // 2) Data from Firestore
+    const data = docSnap.data();
 
-    if (snapshot.empty) {
-      return res.json({
-        success: true,
-        data: null,
-      });
-    }
+    // If you want to rename fields or ensure certain properties:
+    // e.g. "name" -> "subChapterName"
+    // "summary" -> The main text
+    // "wordCount" -> numeric field
+    // "proficiency" -> "empty"/"reading"/"read"/"proficient"
+    // "readStartTime" and "readEndTime" might be Firestore timestamps
+    // Here is an example mapping:
 
-    const doc = snapshot.docs[0];
-    const docData = doc.data();
+    const responseData = {
+      subChapterId: subChapterId, // or docSnap.id
+      subChapterName: data.name || "Untitled",
+      summary: data.summary || "",
+      wordCount: data.wordCount || 0,
+      proficiency: data.proficiency || "empty",
+      // Convert Firestore Timestamp to ISO if they exist
+      readStartTime: data.readStartTime ? data.readStartTime.toDate().toISOString() : null,
+      readEndTime: data.readEndTime ? data.readEndTime.toDate().toISOString() : null,
+      // any other fields you want
+    };
 
-    // The field is named readingTimeSec (the total # of seconds?)
-    // Possibly you'd convert it to WPM if you want, but let's just return it as is.
-    const readingTimeSec = docData.readingTimeSec || null;
+    // 3) Return the subchapter data
+    return res.json(responseData);
 
-    return res.json({
-      success: true,
-      data: {
-        readingTimeSec,
-      },
-    });
   } catch (error) {
-    console.error("Error fetching reading speed:", error);
-    return res.status(500).json({
-      success: false,
-      error: error.message || "Internal server error",
-    });
-  }
-});
-
-
-app.get("/api/has-read-first-subchapter", async (req, res) => {
-  try {
-    const { userId } = req.query;
-    if (!userId) {
-      return res.status(400).json({
-        success: false,
-        error: "Missing userId query parameter."
-      });
-    }
-
-    // Query user_activities_demo where userId == ... AND eventType == "stopReading"
-    // If we find at least one doc, user has read a subchapter
-    const snapshot = await db
-      .collection("user_activities_demo")
-      .where("userId", "==", userId)
-      .where("eventType", "==", "stopReading")
-      .limit(1)
-      .get();
-
-    const hasReadFirstSubchapter = !snapshot.empty;
-
-    return res.json({
-      success: true,
-      data: {
-        hasReadFirstSubchapter
-      }
-    });
-  } catch (error) {
-    console.error("Error in /api/has-read-first-subchapter:", error);
-    return res.status(500).json({
-      success: false,
-      error: error.message || "Internal server error"
-    });
-  }
-});
-
-
-app.get("/api/has-completed-quiz", async (req, res) => {
-  try {
-    const { userId } = req.query;
-    if (!userId) {
-      return res.status(400).json({
-        success: false,
-        error: "Missing userId query parameter."
-      });
-    }
-
-    // Query user_activities_demo where userId == ... AND eventType == "quizCompleted"
-    // If we find at least one doc, user has completed a quiz
-    const snapshot = await db
-      .collection("user_activities_demo")
-      .where("userId", "==", userId)
-      .where("eventType", "==", "quizCompleted")
-      .limit(1)
-      .get();
-
-    const hasCompletedQuiz = !snapshot.empty;
-
-    return res.json({
-      success: true,
-      data: {
-        hasCompletedQuiz
-      }
-    });
-  } catch (error) {
-    console.error("Error in /api/has-completed-quiz:", error);
-    return res.status(500).json({
-      success: false,
-      error: error.message || "Internal server error"
-    });
+    console.error("Error fetching subchapter doc:", error);
+    return res.status(500).json({ error: "Internal server error" });
   }
 });
 
 
 
-
-
-app.post("/api/onboard", async (req, res) => {
-  try {
-    const { name, age, school, exam } = req.body;
-    if (!name || !age || !school || !exam) {
-      return res.status(400).json({ error: 'Missing name, age, exam or school.' });
-    }
-
-    const docRef = await db.collection('onboardedUsers').add({
-      name,
-      exam,     // <--- store it here
-      age,
-      school,
-      createdAt: new Date(),
-    });
-
-    return res.json({ success: true, docId: docRef.id });
-  } catch (error) {
-    console.error('Error storing onboarding data:', error);
-    return res.status(500).json({ error: 'Failed to store onboarding data.' });
-  }
-});
+// =======================================
+// ROUTE CATEGORY: THE MAIN THING
+// =======================================
 
 
 
-// Start the Server
+
+
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
