@@ -1206,6 +1206,16 @@ function getActivitiesForSub(sub, wpm) {
 
 
 exports.generateAdaptivePlan = onRequest(async (req, res) => {
+  // ---------------- CORS HEADERS ----------------
+  res.set("Access-Control-Allow-Origin", "*"); // or restrict to "http://localhost:3000"
+  res.set("Access-Control-Allow-Headers", "Content-Type,Authorization");
+  res.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+
+  // If it's an OPTIONS request, respond immediately
+  if (req.method === "OPTIONS") {
+    return res.status(204).send("");
+  }
+
   try {
     // ---------------------------------------------------------
     // A) Extract Inputs
@@ -1240,7 +1250,6 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
 
     // ---------------------------------------------------------
     // B) Fetch User Persona -> get wpm, dailyReadingTime
-    //    (using a .where() query rather than doc(userId))
     // ---------------------------------------------------------
     const personaQuery = await db
       .collection("learnerPersonas")
@@ -1315,9 +1324,6 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
     // ---------------------------------------------------------
     // D) Generate a Single Ordered Array of Activities
     // ---------------------------------------------------------
-    // We'll walk each book -> chapter -> subchapter in sorted order,
-    // expand them into activities, and store all in one big array.
-
     const allActivities = [];
     for (const book of booksData) {
       if (!book.chapters) continue;
@@ -1362,9 +1368,7 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
       }
     }
 
-    // Schedule activities within dailyReadingTime
     for (let i = 0; i < allActivities.length; i++) {
-      // If we've reached beyond the max day count, decide whether to break or continue.
       if (dayIndex > maxDayCount && maxDayCount > 0) {
         // Option 1: break out if you don't want to schedule past targetDate
         // break;
