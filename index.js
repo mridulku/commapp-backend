@@ -2018,38 +2018,50 @@ app.get("/api/home-plan-id", async (req, res) => {
 //    Query "adaptive_demo" for docs with { userId }, ordered by createdAt desc, limit=1
 app.get("/api/adaptive-plan-id", async (req, res) => {
   try {
+    console.log("[DEBUG] GET /api/adaptive-plan-id => query:", req.query);
+
     const { userId } = req.query;
     if (!userId) {
+      console.log("[DEBUG] Missing userId in query params");
       return res.status(400).json({ error: "Missing userId in query params" });
     }
+
+    console.log("[DEBUG] userId is:", userId);
 
     const db = admin.firestore();
     const collRef = db.collection("adaptive_demo");
 
+    console.log("[DEBUG] Querying Firestore => adaptive_demo, where userId == userId");
+    // Fetch *all* docs for this user, ordered by createdAt descending
     const querySnap = await collRef
       .where("userId", "==", userId)
       .orderBy("createdAt", "desc")
-      .limit(1)
       .get();
 
+    console.log("[DEBUG] querySnap size =>", querySnap.size);
+
     if (querySnap.empty) {
+      // No docs found for this user
+      console.log("[DEBUG] No documents found for userId:", userId);
       return res.json({
         success: true,
-        planId: null, // No doc found
+        planIds: [],  // Return an empty array if nothing found
       });
     }
 
-    const doc = querySnap.docs[0];
+    // Map all document IDs into an array
+    const planIds = querySnap.docs.map((doc) => doc.id);
+    console.log("[DEBUG] Found plan IDs =>", planIds);
+
     return res.json({
       success: true,
-      planId: doc.id,
+      planIds, // e.g. ["abc123", "def456", ...]
     });
   } catch (error) {
-    console.error("Error fetching adaptive plan ID:", error);
+    console.error("[ERROR] fetching adaptive plan IDs:", error);
     return res.status(500).json({ error: error.message });
   }
 });
-
 
 
 
