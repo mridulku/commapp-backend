@@ -2064,6 +2064,29 @@ app.get("/api/adaptive-plan-id", async (req, res) => {
 });
 
 
+app.get("/api/adaptive-plans", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res.status(400).json({ error: "Missing userId in query." });
+    }
+
+    // Query Firestore from server side
+    const collRef = db.collection("adaptive_demo");
+    const snap = await collRef.where("userId", "==", userId).get();
+
+    const plans = [];
+    snap.forEach((doc) => {
+      plans.push({ id: doc.id, ...doc.data() });
+    });
+
+    return res.json({ success: true, plans });
+  } catch (err) {
+    console.error("Error fetching plans in Express route:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
