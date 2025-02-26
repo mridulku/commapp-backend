@@ -1158,46 +1158,37 @@ const db = admin.firestore(); // Assuming you've already initialized admin
  * Expand a subchapter into an ordered array of activities
  * based on its proficiency.
  */
-function getActivitiesForSub(sub, wpm) {
-  // possible statuses: "unread" -> [READ, QUIZ, REVISE]
-  //                   "read"   -> [QUIZ, REVISE]
-  //                   "proficient" -> [REVISE]
-  //                   "mastered"   -> []
+
+function getActivitiesForSub(sub, { wpm, quizTime, reviseTime }) {
   const activities = [];
   const proficiency = sub.proficiency || "unread";
-
-  // 1) READ
+  
+  // READ 
   if (proficiency === "unread") {
     const wordCount = sub.wordCount || 0;
-    const minutesNeeded = wordCount > 0 ? (wordCount / wpm) : 0;
+    const minutesNeeded = wordCount > 0 ? Math.ceil(wordCount / wpm) : 0;
     activities.push({
       subChapterId: sub.id,
       type: "READ",
-      timeNeeded: Math.ceil(minutesNeeded), // round up
+      timeNeeded: minutesNeeded,
     });
   }
 
-  // 2) QUIZ
+  // QUIZ
   if (proficiency === "unread" || proficiency === "read") {
-    // fixed 1 minute
     activities.push({
       subChapterId: sub.id,
       type: "QUIZ",
-      timeNeeded: 1,
+      timeNeeded: quizTime, // use the override
     });
   }
 
-  // 3) REVISE
-  if (
-    proficiency === "unread" ||
-    proficiency === "read" ||
-    proficiency === "proficient"
-  ) {
-    // fixed 1 minute
+  // REVISE
+  if (proficiency === "unread" || proficiency === "read" || proficiency === "proficient") {
     activities.push({
       subChapterId: sub.id,
       type: "REVISE",
-      timeNeeded: 1,
+      timeNeeded: reviseTime, // use the override
     });
   }
 
@@ -1218,7 +1209,7 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
 
   try {
     // ---------------------------------------------------------
-    // A) Extract Inputs
+    // A) Extract Basic Required Input
     // ---------------------------------------------------------
     const userId = req.query.userId || req.body.userId;
     if (!userId) {
@@ -1227,7 +1218,7 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
       });
     }
 
-    // Target date
+    // We still require a target date, but you could make it optional if you want
     const targetDateStr = req.query.targetDate || req.body.targetDate;
     if (!targetDateStr) {
       return res.status(400).json({
@@ -1243,13 +1234,40 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
       });
     }
 
-    // Current date
+    // Current date => used to default maxDayCount
     const today = new Date();
-    let maxDayCount = getDaysBetween(today, targetDate);
-    if (maxDayCount < 0) maxDayCount = 0;
+    let defaultMaxDayCount = getDaysBetween(today, targetDate);
+    if (defaultMaxDayCount < 0) defaultMaxDayCount = 0;
 
     // ---------------------------------------------------------
-    // B) Fetch User Persona -> get wpm, dailyReadingTime
+    // B) Check for Optional Overrides in the Request
+    // ---------------------------------------------------------
+    // 1) maxDays: if user wants to override the day-count
+    const maxDaysOverride =
+      req.body.maxDays !== undefined ? Number(req.body.maxDays) : null;
+
+    // 2) optional WPM and dailyReadingTime overrides
+    //    (if not provided, we fallback to Firestore persona)
+    const wpmOverride =
+      req.body.wpm !== undefined ? Number(req.body.wpm) : null;
+    const dailyReadingTimeOverride =
+      req.body.dailyReadingTime !== undefined ? Number(req.body.dailyReadingTime) : null;
+
+    // 3) optional list of selectedBooks (array of IDs) => if omitted, fetch all
+    const selectedBooks =
+      req.body.selectedBooks && Array.isArray(req.body.selectedBooks)
+        ? req.body.selectedBooks
+        : null;
+
+    // 4) optional times for quiz/revise (example)
+    const quizTimeOverride = req.body.quizTime !== undefined ? Number(req.body.quizTime) : 1;
+    const reviseTimeOverride =
+      req.body.reviseTime !== undefined ? Number(req.body.reviseTime) : 1;
+
+    // (You can add more parameters similarly, e.g. "includeReading", "includeQuiz", etc.)
+
+    // ---------------------------------------------------------
+    // C) Fetch User Persona (unless we override wpm/dailyReadingTime)
     // ---------------------------------------------------------
     const personaQuery = await db
       .collection("learnerPersonas")
@@ -1265,20 +1283,42 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
 
     // Grab the first matching document
     const personaSnap = personaQuery.docs[0];
-    const { wpm, dailyReadingTime } = personaSnap.data() || {};
+    const { wpm: firestoreWpm, dailyReadingTime: firestoreDaily } =
+      personaSnap.data() || {};
 
-    if (!wpm || !dailyReadingTime) {
+    if (!firestoreWpm || !firestoreDaily) {
       return res.status(400).json({
         error: "Persona document must contain 'wpm' and 'dailyReadingTime'.",
       });
     }
 
-    // ---------------------------------------------------------
-    // C) Fetch & Sort Books/Chapters/Subchapters
-    // ---------------------------------------------------------
-    const booksSnap = await db.collection("books_demo").get();
-    const booksData = [];
+    // Final wpm / dailyTime (fallback to Firestore if override not provided)
+    const finalWpm = wpmOverride || firestoreWpm;
+    const finalDailyReadingTime = dailyReadingTimeOverride || firestoreDaily;
 
+    // ---------------------------------------------------------
+    // D) Determine Final maxDayCount
+    // ---------------------------------------------------------
+    // If user provided maxDays in the request, use that.
+    // Otherwise, default to the days-between 'today' and targetDate.
+    let maxDayCount = maxDaysOverride !== null ? maxDaysOverride : defaultMaxDayCount;
+
+    // ---------------------------------------------------------
+    // E) Fetch & Sort Books/Chapters/Subchapters
+    // ---------------------------------------------------------
+    let booksSnap;
+    if (selectedBooks && selectedBooks.length > 0) {
+      // If user specified a subset of books, we only fetch those
+      booksSnap = await db
+        .collection("books_demo")
+        .where(admin.firestore.FieldPath.documentId(), "in", selectedBooks)
+        .get();
+    } else {
+      // Otherwise, fetch all
+      booksSnap = await db.collection("books_demo").get();
+    }
+
+    let booksData = [];
     for (const bookDoc of booksSnap.docs) {
       const bookId = bookDoc.id;
       const book = {
@@ -1286,7 +1326,7 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
         ...bookDoc.data(),
       };
 
-      // fetch chapters
+      // Fetch chapters for each book
       const chaptersSnap = await db
         .collection("chapters_demo")
         .where("bookId", "==", bookId)
@@ -1300,7 +1340,7 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
           ...chapterDoc.data(),
         };
 
-        // fetch subchapters
+        // Fetch subchapters
         const subSnap = await db
           .collection("subchapters_demo")
           .where("chapterId", "==", chapterId)
@@ -1322,7 +1362,7 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
     }
 
     // ---------------------------------------------------------
-    // D) Generate a Single Ordered Array of Activities
+    // F) Generate a Single Ordered Array of Activities
     // ---------------------------------------------------------
     const allActivities = [];
     for (const book of booksData) {
@@ -1331,7 +1371,12 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
         if (!chapter.subchapters) continue;
         for (const sub of chapter.subchapters) {
           // For each subchapter, get READ/QUIZ/REVISE in the correct order
-          const subActivities = getActivitiesForSub(sub, wpm);
+          // We'll pass in finalWpm, quizTimeOverride, reviseTimeOverride
+          const subActivities = getActivitiesForSub(sub, {
+            wpm: finalWpm,
+            quizTime: quizTimeOverride,
+            reviseTime: reviseTimeOverride,
+          });
 
           // Collect them in a single array (with metadata)
           for (const activity of subActivities) {
@@ -1340,7 +1385,7 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
               bookId: book.id,
               chapterId: chapter.id,
               subChapterName: sub.name || "",
-              // you can also store book/chapter names if desired
+              // you could also store book/chapter names if you like
             });
           }
         }
@@ -1348,9 +1393,9 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
     }
 
     // ---------------------------------------------------------
-    // E) Distribute Activities into Days (a.k.a. sessions)
+    // G) Distribute Activities into Days (Sessions)
     // ---------------------------------------------------------
-    const dailyTimeMins = dailyReadingTime;
+    const dailyTimeMins = finalDailyReadingTime;
     let dayIndex = 1;
     let currentDayTime = 0;
     let currentDayActivities = [];
@@ -1373,20 +1418,15 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
         // Option 1: break out if you don't want to schedule past targetDate
         // break;
 
-        // Option 2: Or just keep scheduling beyond target date
+        // Option 2: keep scheduling (the default here)
       }
 
       const activity = allActivities[i];
-
-      // If adding this activity exceeds daily limit and we already have something in this day...
-      if (
-        currentDayTime + activity.timeNeeded > dailyTimeMins &&
-        currentDayTime > 0
-      ) {
+      // If adding this activity exceeds daily limit and we already have something...
+      if (currentDayTime + activity.timeNeeded > dailyTimeMins && currentDayTime > 0) {
         pushCurrentDay();
       }
 
-      // Add the activity to the current day
       currentDayActivities.push(activity);
       currentDayTime += activity.timeNeeded;
     }
@@ -1397,7 +1437,7 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
     }
 
     // ---------------------------------------------------------
-    // F) Write Plan to Firestore
+    // H) Write Plan to Firestore
     // ---------------------------------------------------------
     const planDoc = {
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -1406,12 +1446,15 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
       targetDate: targetDateStr,
       sessions,
       maxDayCount,
+      // You might also store finalWpm, finalDailyReadingTime, or other param info
+      wpmUsed: finalWpm,
+      dailyReadingTimeUsed: finalDailyReadingTime,
     };
 
     const newRef = await db.collection("adaptive_demo").add(planDoc);
 
     // ---------------------------------------------------------
-    // G) Return Success
+    // I) Return Success
     // ---------------------------------------------------------
     return res.status(200).json({
       message: "Successfully generated an adaptive plan in 'adaptive_demo'.",
