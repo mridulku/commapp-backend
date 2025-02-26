@@ -1867,30 +1867,52 @@ app.get("/api/user-activities", async (req, res) => {
 
 app.get("/api/adaptive-plan", async (req, res) => {
   try {
+    console.log("[GET /api/adaptive-plan] Incoming request...");
     const { planId } = req.query;
+    console.log("Query params:", req.query);
 
     if (!planId) {
+      console.log("No 'planId' provided, returning 400...");
       return res.status(400).json({ error: "Missing 'planId' in query params" });
     }
 
-    // Fetch the plan from the 'adaptive_demo' collection
-    const planRef = db.collection("adaptive_books").doc(planId);
-    const planSnap = await planRef.get();
+    // 1) First try 'adaptive_demo'
+    console.log(`Checking 'adaptive_demo' for planId='${planId}'`);
+    const demoRef = db.collection("adaptive_demo").doc(planId);
+    const demoSnap = await demoRef.get();
 
-    if (!planSnap.exists) {
-      return res.status(404).json({ error: `Plan document ${planId} not found` });
+    if (demoSnap.exists) {
+      console.log(`Found doc in 'adaptive_demo' => planId='${planId}'`);
+      const planData = demoSnap.data();
+      console.log("Returning planDoc from 'adaptive_demo'...");
+      return res.json({ planDoc: planData });
     }
 
-    // Return the doc data
-    const planData = planSnap.data();
-    return res.json({ planDoc: planData });
+    // 2) Not found in 'adaptive_demo', so check 'adaptive_books'
+    console.log(`Not found in 'adaptive_demo'. Checking 'adaptive_books' for planId='${planId}'`);
+    const booksRef = db.collection("adaptive_books").doc(planId);
+    const booksSnap = await booksRef.get();
+
+    if (booksSnap.exists) {
+      console.log(`Found doc in 'adaptive_books' => planId='${planId}'`);
+      const planData = booksSnap.data();
+      console.log("Returning planDoc from 'adaptive_books'...");
+      return res.json({ planDoc: planData });
+    }
+
+    // 3) Not found in either collection => 404
+    console.log(
+      `Document '${planId}' not found in 'adaptive_demo' nor 'adaptive_books'`
+    );
+    return res
+      .status(404)
+      .json({ error: `Plan document ${planId} not found in any collection` });
   } catch (error) {
-    logger.error("Error fetching adaptive plan:", error);
+    console.error("Error in /api/adaptive-plan route:", error);
+    logger.error("Error fetching plan from adaptive_demo/books:", error);
     return res.status(500).json({ error: error.message });
   }
 });
-
-
 
 
 
@@ -1955,6 +1977,78 @@ app.get("/api/subchapters/:id", async (req, res) => {
 // =======================================
 
 
+
+
+app.get("/api/home-plan-id", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res.status(400).json({ error: "Missing userId in query params" });
+    }
+
+    const db = admin.firestore();
+    const collRef = db.collection("adaptive_books");
+
+    // Query: .where("userId","==", userId).orderBy("createdAt","desc").limit(1)
+    const querySnap = await collRef
+      .where("userId", "==", userId)
+      .orderBy("createdAt", "desc")
+      .limit(1)
+      .get();
+
+    if (querySnap.empty) {
+      return res.json({
+        success: true,
+        homePlanId: null, // No doc found
+      });
+    }
+
+    const doc = querySnap.docs[0];
+    return res.json({
+      success: true,
+      homePlanId: doc.id, // The doc ID
+    });
+  } catch (error) {
+    console.error("Error fetching home plan ID:", error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// 2) GET /api/adaptive-plan-id
+//    Query "adaptive_demo" for docs with { userId }, ordered by createdAt desc, limit=1
+app.get("/api/adaptive-plan-id", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res.status(400).json({ error: "Missing userId in query params" });
+    }
+
+    const db = admin.firestore();
+    const collRef = db.collection("adaptive_demo");
+
+    const querySnap = await collRef
+      .where("userId", "==", userId)
+      .orderBy("createdAt", "desc")
+      .limit(1)
+      .get();
+
+    if (querySnap.empty) {
+      return res.json({
+        success: true,
+        planId: null, // No doc found
+      });
+    }
+
+    const doc = querySnap.docs[0];
+    return res.json({
+      success: true,
+      planId: doc.id,
+    });
+  } catch (error) {
+    console.error("Error fetching adaptive plan ID:", error);
+    return res.status(500).json({ error: error.message });
+  }
+});
 
 
 

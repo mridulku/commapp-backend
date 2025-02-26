@@ -1152,57 +1152,7 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
 const db = admin.firestore(); // Assuming you've already initialized admin
 
 
-function parseLeadingSections(str) {
-  const parts = str.split(".").map((p) => p.trim());
-  const result = [];
-  for (let i = 0; i < parts.length; i++) {
-    const maybeNum = parseInt(parts[i], 10);
-    if (!isNaN(maybeNum)) {
-      result.push(maybeNum);
-    } else {
-      break;
-    }
-  }
-  if (result.length === 0) return [Infinity];
-  return result;
-}
 
-function compareSections(aSections, bSections) {
-  const len = Math.max(aSections.length, bSections.length);
-  for (let i = 0; i < len; i++) {
-    const aVal = aSections[i] ?? 0;
-    const bVal = bSections[i] ?? 0;
-    if (aVal !== bVal) {
-      return aVal - bVal;
-    }
-  }
-  return 0;
-}
-
-function sortByNameWithNumericAware(items) {
-  return items.sort((a, b) => {
-    if (!a.name && !b.name) return 0;
-    if (!a.name) return 1;
-    if (!b.name) return -1;
-    const aSections = parseLeadingSections(a.name);
-    const bSections = parseLeadingSections(b.name);
-    const sectionCompare = compareSections(aSections, bSections);
-    if (sectionCompare !== 0) {
-      return sectionCompare;
-    } else {
-      // fallback to standard string compare if numeric is equal
-      return a.name.localeCompare(b.name);
-    }
-  });
-}
-
-/**
- * Calculate # of days between two dates (rounding up).
- */
-function getDaysBetween(startDate, endDate) {
-  const msInDay = 24 * 60 * 60 * 1000;
-  return Math.ceil((endDate - startDate) / msInDay);
-}
 
 /**
  * Expand a subchapter into an ordered array of activities
@@ -1254,6 +1204,7 @@ function getActivitiesForSub(sub, wpm) {
   return activities;
 }
 
+
 exports.generateAdaptivePlan = onRequest(async (req, res) => {
   try {
     // ---------------------------------------------------------
@@ -1289,17 +1240,24 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
 
     // ---------------------------------------------------------
     // B) Fetch User Persona -> get wpm, dailyReadingTime
+    //    (using a .where() query rather than doc(userId))
     // ---------------------------------------------------------
-    const personaDocRef = db.collection("learnerPersonas").doc(userId);
-    const personaDocSnap = await personaDocRef.get();
+    const personaQuery = await db
+      .collection("learnerPersonas")
+      .where("userId", "==", userId)
+      .limit(1)
+      .get();
 
-    if (!personaDocSnap.exists) {
+    if (personaQuery.empty) {
       return res.status(404).json({
         error: `No learner persona found for userId: ${userId}`,
       });
     }
 
-    const { wpm, dailyReadingTime } = personaDocSnap.data() || {};
+    // Grab the first matching document
+    const personaSnap = personaQuery.docs[0];
+    const { wpm, dailyReadingTime } = personaSnap.data() || {};
+
     if (!wpm || !dailyReadingTime) {
       return res.status(400).json({
         error: "Persona document must contain 'wpm' and 'dailyReadingTime'.",
@@ -1354,16 +1312,11 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
       booksData.push(book);
     }
 
-    // sort books
-    // (If the "book" docs have a "name" field, you could do numeric-aware sorting here)
-    // booksData = sortByNameWithNumericAware(booksData); 
-    // (If needed; depends on your schema. Otherwise, you can keep as is.)
-
     // ---------------------------------------------------------
     // D) Generate a Single Ordered Array of Activities
     // ---------------------------------------------------------
-    // We'll walk through each book -> chapter -> subchapter in sorted order,
-    // expand them into activities, and push them onto one big array.
+    // We'll walk each book -> chapter -> subchapter in sorted order,
+    // expand them into activities, and store all in one big array.
 
     const allActivities = [];
     for (const book of booksData) {
@@ -1371,31 +1324,25 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
       for (const chapter of book.chapters) {
         if (!chapter.subchapters) continue;
         for (const sub of chapter.subchapters) {
-          // For each subchapter, get READ/QUIZ/REVISE in correct order
+          // For each subchapter, get READ/QUIZ/REVISE in the correct order
           const subActivities = getActivitiesForSub(sub, wpm);
 
-          // Now we push them in the sequence we got them
-          // This ensures subchapter #1's read->quiz->revise appear together
+          // Collect them in a single array (with metadata)
           for (const activity of subActivities) {
             allActivities.push({
               ...activity,
               bookId: book.id,
               chapterId: chapter.id,
               subChapterName: sub.name || "",
-              // you can store book/chapter names if desired
+              // you can also store book/chapter names if desired
             });
           }
         }
       }
     }
 
-    // Because we walked in sorted order (book->chapter->subchap),
-    // each subchapter's activities appear READ->QUIZ->REVISE. Then we move on.
-
-    // No final global sort needed; we've already ensured the correct sequence.
-
     // ---------------------------------------------------------
-    // E) Distribute Activities into Days
+    // E) Distribute Activities into Days (a.k.a. sessions)
     // ---------------------------------------------------------
     const dailyTimeMins = dailyReadingTime;
     let dayIndex = 1;
@@ -1415,16 +1362,19 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
       }
     }
 
-    // now schedule
+    // Schedule activities within dailyReadingTime
     for (let i = 0; i < allActivities.length; i++) {
-      // If we've reached beyond the max day count, decide if we continue or break
+      // If we've reached beyond the max day count, decide whether to break or continue.
       if (dayIndex > maxDayCount && maxDayCount > 0) {
-        // break if you want to avoid going past the target date,
-        // or just continue scheduling
+        // Option 1: break out if you don't want to schedule past targetDate
         // break;
+
+        // Option 2: Or just keep scheduling beyond target date
       }
 
       const activity = allActivities[i];
+
+      // If adding this activity exceeds daily limit and we already have something in this day...
       if (
         currentDayTime + activity.timeNeeded > dailyTimeMins &&
         currentDayTime > 0
@@ -1432,7 +1382,7 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
         pushCurrentDay();
       }
 
-      // add the activity to the current day
+      // Add the activity to the current day
       currentDayActivities.push(activity);
       currentDayTime += activity.timeNeeded;
     }
@@ -1459,17 +1409,16 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
     // ---------------------------------------------------------
     // G) Return Success
     // ---------------------------------------------------------
-    res.status(200).json({
-      message: "Successfully generated an adaptive plan and stored in 'adaptive_demo'.",
-      planId: newRef.id, // So you know the doc ID
+    return res.status(200).json({
+      message: "Successfully generated an adaptive plan in 'adaptive_demo'.",
+      planId: newRef.id,
       planDoc,
     });
   } catch (error) {
     logger.error("Error generating adaptive plan", error);
-    res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: error.message });
   }
 });
-
 
 
 
@@ -1564,9 +1513,55 @@ exports.generatePlanStats = onDocumentCreated({
 
 
 
+
+// 1) Helper for numeric-aware sorting
+function parseLeadingSections(str) {
+  const parts = str.split(".").map((p) => p.trim());
+  const result = [];
+  for (let i = 0; i < parts.length; i++) {
+    const maybeNum = parseInt(parts[i], 10);
+    if (!isNaN(maybeNum)) {
+      result.push(maybeNum);
+    } else {
+      break;
+    }
+  }
+  if (result.length === 0) return [Infinity];
+  return result;
+}
+
+function compareSections(aSections, bSections) {
+  const len = Math.max(aSections.length, bSections.length);
+  for (let i = 0; i < len; i++) {
+    const aVal = aSections[i] ?? 0;
+    const bVal = bSections[i] ?? 0;
+    if (aVal !== bVal) {
+      return aVal - bVal;
+    }
+  }
+  return 0;
+}
+
+function sortByNameWithNumericAware(items) {
+  return items.sort((a, b) => {
+    if (!a.name && !b.name) return 0;
+    if (!a.name) return 1;
+    if (!b.name) return -1;
+    const aSections = parseLeadingSections(a.name);
+    const bSections = parseLeadingSections(b.name);
+    const sectionCompare = compareSections(aSections, bSections);
+    if (sectionCompare !== 0) {
+      return sectionCompare;
+    } else {
+      return a.name.localeCompare(b.name);
+    }
+  });
+}
+
+// 2) Helper: always create READ, QUIZ, REVISE ignoring proficiency
 function getAlwaysAllActivities(subchapter, wpm) {
   const wordCount = subchapter.wordCount || 0;
-  const readTime = wordCount ? Math.ceil(wordCount / wpm) : 0;
+  const readTime = wordCount > 0 ? Math.ceil(wordCount / wpm) : 0;
 
   return [
     {
@@ -1596,15 +1591,21 @@ function getAlwaysAllActivities(subchapter, wpm) {
   ];
 }
 
+// 3) Helper: get # of days between two dates (rounding up)
+function getDaysBetween(startDate, endDate) {
+  const msInDay = 24 * 60 * 60 * 1000;
+  return Math.ceil((endDate - startDate) / msInDay);
+}
+
+
+
 
 
 
 
 exports.generateBookPlan = onRequest(async (req, res) => {
   try {
-    // ---------------------------------------------------------
     // A) Extract Inputs
-    // ---------------------------------------------------------
     const userId = req.query.userId || req.body.userId;
     if (!userId) {
       return res.status(400).json({
@@ -1612,7 +1613,6 @@ exports.generateBookPlan = onRequest(async (req, res) => {
       });
     }
 
-    // We'll accept a targetDate (like the adaptive function).
     const targetDateStr = req.query.targetDate || req.body.targetDate;
     if (!targetDateStr) {
       return res.status(400).json({
@@ -1626,33 +1626,36 @@ exports.generateBookPlan = onRequest(async (req, res) => {
       });
     }
 
-    // Calculate maxDayCount like the adaptive plan (even if we won't use it)
+    // Calculate maxDayCount
     const today = new Date();
     let maxDayCount = getDaysBetween(today, targetDate);
     if (maxDayCount < 0) maxDayCount = 0;
 
-    // ---------------------------------------------------------
-    // B) Fetch the user's persona (to get WPM for reading time).
-    // ---------------------------------------------------------
+    // B) Fetch user persona (using a .where() query)
     const db = admin.firestore();
-    const personaRef = db.collection("learnerPersonas").doc(userId);
-    const personaSnap = await personaRef.get();
+    const personaQuery = await db
+      .collection("learnerPersonas")
+      .where("userId", "==", userId)
+      .limit(1)
+      .get();
 
-    if (!personaSnap.exists) {
+    if (personaQuery.empty) {
       return res.status(404).json({
         error: `No learner persona found for userId: ${userId}`,
       });
     }
-    const { wpm } = personaSnap.data() || {};
+
+    // Grab the first (and presumably only) matching doc
+    const personaSnap = personaQuery.docs[0];
+    const personaData = personaSnap.data() || {};
+    const { wpm } = personaData;
     if (!wpm) {
       return res.status(400).json({
         error: "Persona document must contain 'wpm'.",
       });
     }
 
-    // ---------------------------------------------------------
     // C) Fetch Books -> Chapters -> Subchapters
-    // ---------------------------------------------------------
     const booksSnap = await db.collection("books_demo").get();
     const booksData = [];
 
@@ -1697,6 +1700,7 @@ exports.generateBookPlan = onRequest(async (req, res) => {
       // sort chapters
       const sortedChapters = sortByNameWithNumericAware(chapters);
 
+      // add final "book" object
       booksData.push({
         id: bookId,
         ...bookData,
@@ -1704,67 +1708,62 @@ exports.generateBookPlan = onRequest(async (req, res) => {
       });
     }
 
-    // ---------------------------------------------------------
-    // D) Build "sessions" (1 session = 1 chapter)
-    // ---------------------------------------------------------
+    // D) Build "sessions" (1 session = 1 book)
     const sessions = [];
     let sessionCounter = 1;
 
     for (const book of booksData) {
-      if (!book.chapters) continue;
+      // gather ALL subchapters from all chapters in the same order
+      const allActivities = [];
 
-      for (const chapter of book.chapters) {
-        const activities = [];
-        if (chapter.subchapters) {
+      if (book.chapters) {
+        for (const chapter of book.chapters) {
+          if (!chapter.subchapters) continue;
+
           for (const sub of chapter.subchapters) {
-            // Always do READ, QUIZ, REVISE
-            const subActivities = getAlwaysAllActivities(sub, wpm);
-            activities.push(...subActivities);
+            // Generate [READ, QUIZ, REVISE]
+            const subActivities = getAlwaysAllActivities(sub, wpm).map((act) => ({
+              ...act,
+              bookName: book.name || "",
+              chapterName: chapter.name || "",
+            }));
+            allActivities.push(...subActivities);
           }
         }
-
-        // We label each session with a numeric index
-        sessions.push({
-          sessionLabel: sessionCounter.toString(),
-          activities,
-        });
-        sessionCounter++;
       }
+
+      sessions.push({
+        sessionLabel: sessionCounter.toString(),
+        activities: allActivities,
+      });
+
+      sessionCounter++;
     }
 
-    // ---------------------------------------------------------
-    // E) Write the plan to Firestore (like adaptive plan)
-    // ---------------------------------------------------------
+    // E) Write plan doc
     const planDoc = {
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       planName: `Book Plan for User ${userId}`,
       userId,
       targetDate: targetDateStr,
       sessions,
-      maxDayCount, // included so structure matches the adaptive plan
+      maxDayCount,
     };
 
     const newRef = await db.collection("adaptive_books").add(planDoc);
 
-    // ---------------------------------------------------------
-    // F) Return the final JSON with the same fields
-    // ---------------------------------------------------------
+    // F) Return final JSON
     return res.status(200).json({
-      message: "Successfully generated a book-based plan and stored in 'adaptive_books'.",
+      message: "Successfully generated a book-based plan (1 book = 1 session) in 'adaptive_books'.",
       planId: newRef.id,
       planDoc,
       sessions,
       userId,
       targetDate: targetDateStr,
-      maxDayCount
+      maxDayCount,
     });
   } catch (error) {
     logger.error("Error generating book-based plan", error);
     return res.status(500).json({ error: error.message });
   }
 });
-
-function getDaysBetween(startDate, endDate) {
-  const msInDay = 24 * 60 * 60 * 1000;
-  return Math.ceil((endDate - startDate) / msInDay);
-}
