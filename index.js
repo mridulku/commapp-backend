@@ -831,6 +831,8 @@ app.post("/api/learnerpersona", authenticateToken, async (req, res) => {
     });
   }
 });
+
+
 app.get("/api/learner-personas", async (req, res) => {
   try {
     const userId = req.query.userId;
@@ -841,31 +843,28 @@ app.get("/api/learner-personas", async (req, res) => {
       });
     }
 
-    // Pseudocode: read from Firestore, Mongo, or wherever you're storing learnerPersonas
-    // Example with Firestore (adjust to your DB):
-    // const docRef = db.collection("learnerPersonas").doc(userId);
-    // const doc = await docRef.get();
+    const snapshot = await admin
+      .firestore()
+      .collection("learnerPersonas")
+      .where("userId", "==", userId)
+      .limit(1)
+      .get();
 
-    // Example with Mongoose or any other DB
-    // const doc = await LearnerPersonaModel.findOne({ userId });
-
-    // For demonstration, let's pretend we found a doc with isOnboarded = true
-    const doc = {
-      userId: userId,
-      isOnboarded: true, // or false, depends on your DB
-    };
-
-    if (!doc) {
+    if (snapshot.empty) {
       return res.status(404).json({
         success: false,
         error: "No learnerPersona found for this user.",
       });
     }
 
-    res.json({
+    // We got at least one doc
+    const doc = snapshot.docs[0]; 
+    const data = doc.data();
+
+    return res.json({
       success: true,
       data: {
-        isOnboarded: doc.isOnboarded,
+        isOnboarded: data.isOnboarded,
       },
     });
   } catch (err) {
@@ -876,6 +875,8 @@ app.get("/api/learner-personas", async (req, res) => {
     });
   }
 });
+
+
 app.post("/onboardingassessment", authenticateToken, async (req, res) => {
   try {
     const assessmentData = req.body;
