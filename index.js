@@ -2087,6 +2087,39 @@ app.get("/api/adaptive-plans", async (req, res) => {
 });
 
 
+
+app.get("/api/books-user", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Missing userId in query params" });
+    }
+
+    // Query the "books_demo" collection for all docs where "userId" field matches
+    const snapshot = await db
+      .collection("books_demo")
+      .where("userId", "==", userId)
+      .get();
+
+    const books = snapshot.docs.map((doc) => {
+      return {
+        // doc.id is the Firestore document ID
+        id: doc.id,
+        ...doc.data(),
+      };
+    });
+
+    return res.json({ success: true, data: books });
+  } catch (error) {
+    console.error("Error fetching books for user:", error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);

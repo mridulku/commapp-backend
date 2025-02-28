@@ -1398,13 +1398,15 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
             quizTime: quizTimeOverride,
             reviseTime: reviseTimeOverride,
           });
-          // attach the "level" to each activity
+          // attach the "level", plus book and chapter info
           for (const activity of subActivities) {
             allActivities.push({
               ...activity,
-              level, // <--- the new field
+              level,               // <--- the new field
               bookId: book.id,
+              bookName: book.name || "",        // <--- added
               chapterId: chapter.id,
+              chapterName: chapter.name || "",  // <--- added
               subChapterName: sub.name || "",
             });
           }
@@ -1485,7 +1487,6 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
     return res.status(500).json({ error: error.message });
   }
 });
-
 
 
 exports.generatePlanStats = onDocumentCreated({
