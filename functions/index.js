@@ -1670,8 +1670,21 @@ function getDaysBetween(startDate, endDate) {
 
 
 exports.generateBookPlan = onRequest(async (req, res) => {
+  // ---------------- CORS HEADERS (Optional, if needed) ----------------
+  // If you need the same CORS approach as generateAdaptivePlan, uncomment:
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Headers", "Content-Type,Authorization");
+  res.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  //
+  // // Handle preflight
+   if (req.method === "OPTIONS") {
+   return res.status(204).send("");
+  }
+
   try {
-    // A) Extract Inputs
+    // ---------------------------------------------------------
+    // A) Basic Required Input
+    // ---------------------------------------------------------
     const userId = req.query.userId || req.body.userId;
     if (!userId) {
       return res.status(400).json({
@@ -1685,101 +1698,178 @@ exports.generateBookPlan = onRequest(async (req, res) => {
         error: "Missing targetDate in request (req.query or req.body).",
       });
     }
+
     const targetDate = new Date(targetDateStr);
     if (isNaN(targetDate.getTime())) {
       return res.status(400).json({
-        error: "Invalid targetDate format. Provide a valid date string (e.g. '2025-07-20').",
+        error: "Invalid targetDate format. Use something like '2025-07-20'.",
       });
     }
 
-    // Calculate maxDayCount
+    // ---------------------------------------------------------
+    // B) Calculate default maxDayCount from today's date
+    // ---------------------------------------------------------
     const today = new Date();
-    let maxDayCount = getDaysBetween(today, targetDate);
-    if (maxDayCount < 0) maxDayCount = 0;
+    let defaultMaxDayCount = getDaysBetween(today, targetDate);
+    if (defaultMaxDayCount < 0) defaultMaxDayCount = 0;
 
-    // B) Fetch user persona (using a .where() query)
+    // ---------------------------------------------------------
+    // C) Optional Overrides
+    // ---------------------------------------------------------
+    const maxDaysOverride =
+      req.body.maxDays !== undefined ? Number(req.body.maxDays) : null;
+    const wpmOverride = req.body.wpm !== undefined ? Number(req.body.wpm) : null;
+    const dailyReadingTimeOverride =
+      req.body.dailyReadingTime !== undefined
+        ? Number(req.body.dailyReadingTime)
+        : null;
+
+    const quizTimeOverride =
+      req.body.quizTime !== undefined ? Number(req.body.quizTime) : 1;
+    const reviseTimeOverride =
+      req.body.reviseTime !== undefined ? Number(req.body.reviseTime) : 1;
+
+    // You can store a “level” if you like (e.g. “mastery”, “revision”)
+    const level = req.body.level || "revision";
+
+    // Optional arrays for filtering
+    const selectedBooks = Array.isArray(req.body.selectedBooks)
+      ? req.body.selectedBooks
+      : null;
+    const selectedChapters = Array.isArray(req.body.selectedChapters)
+      ? req.body.selectedChapters
+      : null;
+    const selectedSubChapters = Array.isArray(req.body.selectedSubChapters)
+      ? req.body.selectedSubChapters
+      : null;
+
+    // Final maxDayCount
+    let maxDayCount =
+      maxDaysOverride !== null ? maxDaysOverride : defaultMaxDayCount;
+
+    // ---------------------------------------------------------
+    // D) Fetch Learner Persona to get default WPM, reading time
+    // ---------------------------------------------------------
     const db = admin.firestore();
-    const personaQuery = await db
+    const personaSnap = await db
       .collection("learnerPersonas")
       .where("userId", "==", userId)
       .limit(1)
       .get();
 
-    if (personaQuery.empty) {
+    if (personaSnap.empty) {
       return res.status(404).json({
         error: `No learner persona found for userId: ${userId}`,
       });
     }
 
-    // Grab the first (and presumably only) matching doc
-    const personaSnap = personaQuery.docs[0];
-    const personaData = personaSnap.data() || {};
-    const { wpm } = personaData;
-    if (!wpm) {
+    const personaData = personaSnap.docs[0].data() || {};
+    if (!personaData.wpm || !personaData.dailyReadingTime) {
       return res.status(400).json({
-        error: "Persona document must contain 'wpm'.",
+        error:
+          "Persona document must contain 'wpm' and 'dailyReadingTime' fields.",
       });
     }
 
-    // C) Fetch Books -> Chapters -> Subchapters
-    const booksSnap = await db.collection("books_demo").get();
-    const booksData = [];
+    // Final WPM and daily reading time
+    const finalWpm = wpmOverride || personaData.wpm;
+    const finalDailyReadingTime =
+      dailyReadingTimeOverride || personaData.dailyReadingTime;
 
+    // ---------------------------------------------------------
+    // E) Fetch Books (filtered if selectedBooks is provided)
+    // ---------------------------------------------------------
+    let booksSnap;
+    if (selectedBooks && selectedBooks.length > 0) {
+      booksSnap = await db
+        .collection("books_demo")
+        .where(admin.firestore.FieldPath.documentId(), "in", selectedBooks)
+        .get();
+    } else {
+      booksSnap = await db.collection("books_demo").get();
+    }
+
+    // Prepare array of books with nested chapters/subchapters
+    const booksData = [];
     for (const bookDoc of booksSnap.docs) {
       const bookId = bookDoc.id;
-      const bookData = bookDoc.data();
+      const book = {
+        id: bookId,
+        ...bookDoc.data(),
+      };
 
-      // fetch chapters
-      const chaptersSnap = await db
-        .collection("chapters_demo")
-        .where("bookId", "==", bookId)
-        .get();
-
-      const chapters = [];
-      for (const chapterDoc of chaptersSnap.docs) {
-        const chapterId = chapterDoc.id;
-        const chapterData = chapterDoc.data();
-
-        // fetch subchapters
-        const subSnap = await db
-          .collection("subchapters_demo")
-          .where("chapterId", "==", chapterId)
+      // -------------------------------------------------------
+      // F) Fetch Chapters (filtered if selectedChapters)
+      // -------------------------------------------------------
+      let chaptersSnap;
+      if (selectedChapters && selectedChapters.length > 0) {
+        chaptersSnap = await db
+          .collection("chapters_demo")
+          .where("bookId", "==", bookId)
+          .where(admin.firestore.FieldPath.documentId(), "in", selectedChapters)
           .get();
-
-        const subchapters = subSnap.docs.map((subDoc) => ({
-          id: subDoc.id,
-          bookId,
-          chapterId,
-          ...subDoc.data(),
-        }));
-
-        // sort subchapters
-        const sortedSubs = sortByNameWithNumericAware(subchapters);
-
-        chapters.push({
-          id: chapterId,
-          ...chapterData,
-          subchapters: sortedSubs,
-        });
+      } else {
+        chaptersSnap = await db
+          .collection("chapters_demo")
+          .where("bookId", "==", bookId)
+          .get();
       }
 
-      // sort chapters
-      const sortedChapters = sortByNameWithNumericAware(chapters);
+      const chaptersData = [];
+      for (const chapterDoc of chaptersSnap.docs) {
+        const chapterId = chapterDoc.id;
+        const chapter = {
+          id: chapterId,
+          ...chapterDoc.data(),
+        };
 
-      // add final "book" object
-      booksData.push({
-        id: bookId,
-        ...bookData,
-        chapters: sortedChapters,
-      });
+        // -----------------------------------------------------
+        // G) Fetch Subchapters (filtered if selectedSubChapters)
+        // -----------------------------------------------------
+        let subSnap;
+        if (selectedSubChapters && selectedSubChapters.length > 0) {
+          subSnap = await db
+            .collection("subchapters_demo")
+            .where("chapterId", "==", chapterId)
+            .where(
+              admin.firestore.FieldPath.documentId(),
+              "in",
+              selectedSubChapters
+            )
+            .get();
+        } else {
+          subSnap = await db
+            .collection("subchapters_demo")
+            .where("chapterId", "==", chapterId)
+            .get();
+        }
+
+        // Build subchapter array + sort
+        const subData = subSnap.docs.map((d) => ({
+          id: d.id,
+          ...d.data(),
+        }));
+        const sortedSubs = sortByNameWithNumericAware(subData);
+
+        chapter.subchapters = sortedSubs;
+        chaptersData.push(chapter);
+      }
+
+      // Sort chapters
+      book.chapters = sortByNameWithNumericAware(chaptersData);
+      booksData.push(book);
     }
 
-    // D) Build "sessions" (1 session = 1 book)
+    // ---------------------------------------------------------
+    // H) Build "sessions" => 1 book per session
+    // ---------------------------------------------------------
     const sessions = [];
     let sessionCounter = 1;
 
     for (const book of booksData) {
-      // gather ALL subchapters from all chapters in the same order
+      const bookName = book.name || `Book ${book.id}`;
+
+      // Step 1: Build an array of all subchapter-based activities
       const allActivities = [];
 
       if (book.chapters) {
@@ -1787,46 +1877,62 @@ exports.generateBookPlan = onRequest(async (req, res) => {
           if (!chapter.subchapters) continue;
 
           for (const sub of chapter.subchapters) {
-            // Generate [READ, QUIZ, REVISE]
-            const subActivities = getAlwaysAllActivities(sub, wpm).map((act) => ({
-              ...act,
-              bookName: book.name || "",
-              chapterName: chapter.name || "",
-            }));
-            allActivities.push(...subActivities);
+            // Generate sub-activities [READ, QUIZ, REVISE] or whatever you prefer
+            const subActivities = getActivitiesForSub(sub, {
+              wpm: finalWpm,
+              quizTime: quizTimeOverride,
+              reviseTime: reviseTimeOverride,
+            });
+
+            // Attach additional metadata if you like
+            for (const activity of subActivities) {
+              allActivities.push({
+                ...activity,
+                level, // the “level” override
+                bookId: book.id,
+                bookName,
+                chapterId: chapter.id,
+                chapterName: chapter.name || "",
+                subChapterName: sub.name || "",
+              });
+            }
           }
         }
       }
 
+      // Step 2: Create a single session with all subchapter activities for this book
       sessions.push({
-        sessionLabel: sessionCounter.toString(),
+        sessionLabel: sessionCounter.toString(), // e.g. "1", "2", ...
         activities: allActivities,
       });
 
       sessionCounter++;
     }
 
-    // E) Write plan doc
+    // ---------------------------------------------------------
+    // I) Write Plan to Firestore
+    // ---------------------------------------------------------
     const planDoc = {
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       planName: `Book Plan for User ${userId}`,
       userId,
       targetDate: targetDateStr,
       sessions,
-      maxDayCount,
+      maxDayCount, // We store it even if we don’t necessarily do day-based distribution
+      wpmUsed: finalWpm,
+      dailyReadingTimeUsed: finalDailyReadingTime,
+      level, // optional
     };
 
     const newRef = await db.collection("adaptive_books").add(planDoc);
 
-    // F) Return final JSON
+    // ---------------------------------------------------------
+    // J) Return the plan
+    // ---------------------------------------------------------
     return res.status(200).json({
       message: "Successfully generated a book-based plan (1 book = 1 session) in 'adaptive_books'.",
       planId: newRef.id,
       planDoc,
-      sessions,
-      userId,
-      targetDate: targetDateStr,
-      maxDayCount,
     });
   } catch (error) {
     logger.error("Error generating book-based plan", error);
