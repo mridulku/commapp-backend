@@ -2120,6 +2120,299 @@ app.get("/api/books-user", async (req, res) => {
 
 
 
+// Initialize Firebase admin if not already done
+// admin.initializeApp({
+//   credential: admin.credential.applicationDefault(),
+//   ...
+// });
+
+
+
+// Reuse or define your numeric-aware sorting functions
+function parseLeadingSections(str) {
+  const parts = str.split('.').map(p => p.trim());
+  const result = [];
+  for (let i = 0; i < parts.length; i++) {
+    const maybeNum = parseInt(parts[i], 10);
+    if (!isNaN(maybeNum)) {
+      result.push(maybeNum);
+    } else {
+      break;
+    }
+  }
+  if (result.length === 0) return [Infinity];
+  return result;
+}
+
+function compareSections(aSections, bSections) {
+  const len = Math.max(aSections.length, bSections.length);
+  for (let i = 0; i < len; i++) {
+    const aVal = aSections[i] ?? 0;
+    const bVal = bSections[i] ?? 0;
+    if (aVal !== bVal) {
+      return aVal - bVal;
+    }
+  }
+  return 0;
+}
+
+function sortByNameNumericAware(items = []) {
+  return items.sort((a, b) => {
+    if (!a.name && !b.name) return 0;
+    if (!a.name) return 1;
+    if (!b.name) return -1;
+    const aSections = parseLeadingSections(a.name);
+    const bSections = parseLeadingSections(b.name);
+    const sectionCompare = compareSections(aSections, bSections);
+    if (sectionCompare !== 0) {
+      return sectionCompare;
+    } else {
+      return a.name.localeCompare(b.name);
+    }
+  });
+}
+
+
+
+// GET /api/processing-data?userId=XYZ
+app.get('/api/processing-data', async (req, res) => {
+  try {
+    const userId = req.query.userId || '';
+    if (!userId) {
+      return res.status(400).json({ error: 'Missing userId param' });
+    }
+
+    // 1) Fetch all books for this user from "books_demo"
+    const booksSnap = await db
+      .collection('books_demo')
+      .where('userId', '==', userId)
+      .orderBy('createdAt', 'desc')
+      .get();
+
+    const booksData = [];
+    for (const bookDoc of booksSnap.docs) {
+      const book = { id: bookDoc.id, ...bookDoc.data() };
+
+      // 2) For each book, find the pdfExtracts that reference it (via bookDemoId)
+      const pdfExtractsSnap = await db
+        .collection('pdfExtracts')
+        .where('bookDemoId', '==', bookDoc.id)
+        .get();
+
+      // We'll store a small array of extracts, each with # of pages
+      const pdfExtractsArr = [];
+      for (const extractDoc of pdfExtractsSnap.docs) {
+        const edata = extractDoc.data() || {};
+        const extractId = extractDoc.id;
+
+        // Count how many pages are in pdfPages for this doc
+        const pagesSnap = await db
+          .collection('pdfPages')
+          .where('pdfDocId', '==', extractId)
+          .get();
+
+        const pagesCount = pagesSnap.size; // no need to fetch text
+
+        pdfExtractsArr.push({
+          id: extractId,
+          filePath: edata.filePath || '',
+          createdAt: edata.createdAt || null,
+          pagesCount,
+        });
+      }
+
+      // 3) For each book, fetch chapters_demo
+      const chaptersSnap = await db
+        .collection('chapters_demo')
+        .where('bookId', '==', bookDoc.id)
+        .get();
+
+      // We'll collect chapters with minimal info, sorted numerically by name
+      let chaptersArr = [];
+      for (const chapDoc of chaptersSnap.docs) {
+        const cdata = chapDoc.data() || {};
+        const chapterId = chapDoc.id;
+
+        // Now fetch subchapters_demo for this chapter
+        const subSnap = await db
+          .collection('subchapters_demo')
+          .where('chapterId', '==', chapterId)
+          .get();
+
+        let subArr = [];
+        for (const sDoc of subSnap.docs) {
+          const sdata = sDoc.data() || {};
+          subArr.push({
+            id: sDoc.id,
+            name: sdata.name || '',
+            summary: sdata.summary || '',
+          });
+        }
+
+        // Sort subchapters by name numeric-aware
+        subArr = sortByNameNumericAware(subArr);
+
+        chaptersArr.push({
+          id: chapterId,
+          name: cdata.name || '',
+          subchapters: subArr,
+        });
+      }
+
+      // Now sort the chapters by numeric-aware name
+      chaptersArr = sortByNameNumericAware(chaptersArr);
+
+      // Build final object for each book
+      const bookObj = {
+        ...book,
+        pdfExtracts: pdfExtractsArr,
+        chapters: chaptersArr,
+      };
+
+      booksData.push(bookObj);
+    }
+
+    // Final payload
+    res.status(200).json({
+      userId,
+      books: booksData,
+    });
+  } catch (error) {
+    console.error('Error fetching processing data:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+
+// server.js or app.js (wherever your Express server is defined)
+
+app.get('/api/chapters-process', async (req, res) => {
+  try {
+    const bookId = req.query.bookId || '';
+    const userId = req.query.userId || 'unknownUser';
+
+    if (!bookId) {
+      return res.status(400).json({ error: 'Missing bookId parameter' });
+    }
+
+    // Query pdfSummaries where bookId == ...
+    const snap = await db
+      .collection('pdfSummaries')
+      .where('bookId', '==', bookId)
+      .limit(1)
+      .get();
+
+    if (snap.empty) {
+      return res.status(404).json({
+        error: `No pdfSummaries doc found for bookId=${bookId}.`
+      });
+    }
+
+    // We pick the first doc
+    const summaryDoc = snap.docs[0];
+    const summaryData = summaryDoc.data() || {};
+
+    // We expect "summary" to be a GPT JSON string like:
+    // { chapters: [ { title, summary, startPage, endPage }, ... ] }
+    const rawJson = summaryData.summary || '';
+    if (!rawJson) {
+      return res.status(404).json({
+        error: `pdfSummaries doc doesn't have a 'summary' field for bookId=${bookId}.`
+      });
+    }
+
+    // Attempt to parse
+    let parsedSummary;
+    try {
+      parsedSummary = JSON.parse(rawJson);
+    } catch (err) {
+      return res.status(500).json({
+        error: 'Failed to parse the GPT summary JSON.',
+        details: err.message,
+      });
+    }
+
+    // The chapters array
+    const chapters = parsedSummary.chapters || [];
+
+    // Return it
+    return res.status(200).json({
+      userId,
+      bookId,
+      chapters
+    });
+  } catch (err) {
+    console.error('Error in /api/chapters-process =>', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+
+app.get('/api/process-book-data', async (req, res) => {
+  try {
+    const userId = req.query.userId || '';
+    const bookId = req.query.bookId || '';
+
+    if (!userId || !bookId) {
+      return res
+        .status(400)
+        .json({ error: 'Missing userId or bookId param' });
+    }
+
+    // 1) Fetch chapters from "chapters_demo" matching userId & bookId
+    const chaptersSnap = await db
+      .collection('chapters_demo')
+      .where('userId', '==', userId)
+      .where('bookId', '==', bookId)
+      .get();
+
+    let chaptersArr = [];
+
+    // 2) For each chapter, also fetch subchapters from "subchapters_demo"
+    for (const chapDoc of chaptersSnap.docs) {
+      const cdata = chapDoc.data() || {};
+      const chapterId = chapDoc.id;
+
+      // fetch subchapters for this chapter
+      const subSnap = await db
+        .collection('subchapters_demo')
+        .where('userId', '==', userId)
+        .where('bookId', '==', bookId)
+        .where('chapterId', '==', chapterId)
+        .get();
+
+      let subArr = [];
+      for (const sDoc of subSnap.docs) {
+        const sdata = sDoc.data() || {};
+        subArr.push({
+          id: sDoc.id,
+          name: sdata.name || '',
+          summary: sdata.summary || '',
+        });
+      }
+
+      chaptersArr.push({
+        id: chapterId,
+        name: cdata.name || '',
+        subchapters: subArr,
+      });
+    }
+
+    // 3) Send the final JSON response
+    res.status(200).json({
+      userId,
+      bookId,
+      chapters: chaptersArr,
+    });
+  } catch (error) {
+    console.error('Error in process-book-data:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
