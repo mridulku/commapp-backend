@@ -270,6 +270,7 @@ exports.addMarkersAndSummarize = onDocumentCreated("pdfExtracts/{docId}", async 
       logger.warn(`No pages found in pdfPages for pdfDocId=${pdfDocId}. Skipping GPT summarization.`);
       return;
     }
+    
 
     // 2) Build the concatenated text, referencing page numbers
     let combinedText = "";
