@@ -1543,7 +1543,6 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
     const reviseTimeOverride =
       req.body.reviseTime !== undefined ? Number(req.body.reviseTime) : 1;
 
-    // NEW: level attribute (e.g. "mastery", "revision", etc.)
     // If not provided, default to "revision" or any string you prefer.
     const level = req.body.level || "revision";
 
@@ -1557,6 +1556,10 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
     const selectedSubChapters = Array.isArray(req.body.selectedSubChapters)
       ? req.body.selectedSubChapters
       : null;
+
+    // If the front-end is sending just a single `bookId` instead of `selectedBooks`,
+    // we can read it here:
+    const singleBookIdFromBody = req.body.bookId || "";
 
     // ---------------------------------------------------------
     // C) Fetch Persona for default wpm/dailyReadingTime
@@ -1592,14 +1595,24 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
     // D) Fetch Books
     // ---------------------------------------------------------
     let booksSnap;
+    // If front-end didn't pass an array in selectedBooks but did pass a single bookId,
+    // we can manually build an array. 
+    let arrayOfBookIds = [];
     if (selectedBooks && selectedBooks.length > 0) {
+      arrayOfBookIds = selectedBooks;
+    } else if (singleBookIdFromBody) {
+      // wrap the single string in an array
+      arrayOfBookIds = [singleBookIdFromBody];
+    }
+
+    if (arrayOfBookIds.length > 0) {
       // Only fetch these book doc IDs
       booksSnap = await db
         .collection("books_demo")
-        .where(admin.firestore.FieldPath.documentId(), "in", selectedBooks)
+        .where(admin.firestore.FieldPath.documentId(), "in", arrayOfBookIds)
         .get();
     } else {
-      // fetch all
+      // otherwise fetch all
       booksSnap = await db.collection("books_demo").get();
     }
 
@@ -1691,11 +1704,11 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
           for (const activity of subActivities) {
             allActivities.push({
               ...activity,
-              level,               // <--- the new field
+              level,                    // <--- the new field
               bookId: book.id,
-              bookName: book.name || "",        // <--- added
+              bookName: book.name || "",
               chapterId: chapter.id,
-              chapterName: chapter.name || "",  // <--- added
+              chapterName: chapter.name || "",
               subChapterName: sub.name || "",
             });
           }
@@ -1748,6 +1761,18 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
     // ---------------------------------------------------------
     // I) Write Plan to Firestore
     // ---------------------------------------------------------
+    // We'll figure out a singleBookId from whichever approach was used
+    // (bookId in the body OR the first element of selectedBooks).
+    let singleBookId = "";
+    // If the user sent `bookId` in the body, we already have singleBookIdFromBody
+    if (singleBookIdFromBody) {
+      singleBookId = singleBookIdFromBody;
+    }
+    // Otherwise, if they used selectedBooks: [...]
+    else if (selectedBooks && selectedBooks.length > 0) {
+      singleBookId = selectedBooks[0];
+    }
+
     const planDoc = {
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       planName: `Adaptive Plan for User ${userId}`,
@@ -1757,8 +1782,8 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
       maxDayCount,
       wpmUsed: finalWpm,
       dailyReadingTimeUsed: finalDailyReadingTime,
-      // Optionally store the level in the planDoc as well (if you want)
       level,
+      bookId: singleBookId, // store one single ID
     };
 
     const newRef = await db.collection("adaptive_demo").add(planDoc);
@@ -1776,7 +1801,6 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
     return res.status(500).json({ error: error.message });
   }
 });
-
 
 /**
  * --------------------------------------------------------------------------------------
