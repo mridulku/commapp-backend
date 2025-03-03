@@ -2446,6 +2446,84 @@ app.get('/api/latest-book', async (req, res) => {
   }
 });
 
+app.post("/login-google", async (req, res) => {
+  try {
+    const { idToken } = req.body;
+    // 1) Verify the ID token
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    const uid = decoded.uid;
+    const email = decoded.email || "";
+    const name = decoded.name || "";
+
+    // 2) Lookup or create the user doc in Firestore "users" collection
+    const usersRef = db.collection("users").doc(uid);
+    const userSnap = await usersRef.get();
+    let userData;
+    if (!userSnap.exists) {
+      // Create the doc if it doesn't exist. Possibly store a placeholder password
+      userData = {
+        username: email, // or name
+        password: "",    // no password for google
+        role: "googleUser",
+        createdAt: new Date(),
+      };
+      await usersRef.set(userData);
+    } else {
+      userData = userSnap.data();
+    }
+
+    // 3) Create your own JWT
+    const token = jwt.sign(
+      {
+        id: uid,
+        username: userData.username,
+        role: userData.role,
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+
+    // 4) Create a Firebase custom token
+    const firebaseCustomToken = await admin
+      .auth()
+      .createCustomToken(uid, { role: userData.role });
+
+    // 5) Return success, plus tokens & user
+    res.json({
+      success: true,
+      token, // your own server JWT
+      firebaseCustomToken,
+      user: {
+        username: userData.username,
+        role: userData.role,
+        onboardingComplete: userData.onboardingComplete || false,
+        // anything else you want
+      },
+    });
+  } catch (error) {
+    console.error("Error in /login-google:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+
+// Pseudocode for your server
+app.post("/create-learner-persona", async (req, res) => {
+  const { userId, wpm, dailyReadingTime } = req.body;
+  // Check if there's already a doc in learnerPersonas for this userId
+  const docRef = db.collection("learnerPersonas").doc(userId);
+  const snap = await docRef.get();
+  if (!snap.exists) {
+    // Create doc with the given data
+    await docRef.set({
+      userId,
+      wpm: wpm,
+      dailyReadingTime: dailyReadingTime
+    });
+  }
+  return res.json({ success: true });
+});
+
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
