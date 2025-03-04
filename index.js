@@ -2548,6 +2548,31 @@ app.post("/create-learner-persona", async (req, res) => {
 });
 
 
+app.post("/api/learner-personas/onboard", async (req, res) => {
+  try {
+    console.log("[/api/learner-personas/onboard] Received request");
+    console.log("Request body:", req.body);
+
+    const { userId } = req.body;
+    if (!userId) {
+      console.log("Error: Missing userId in body");
+      return res.status(400).json({ success: false, error: "Missing userId" });
+    }
+
+    console.log(`Marking user ${userId} as onboarded in Firestore...`);
+    await db
+      .collection("learnerPersonas")
+      .doc(userId)
+      .set({ isOnboarded: true }, { merge: true });
+
+    console.log(`Success: user ${userId} marked as onboarded`);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("Error marking user onboarded:", err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
