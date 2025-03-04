@@ -843,33 +843,37 @@ app.get("/api/learner-personas", async (req, res) => {
       });
     }
 
+    // Query the 'learnerPersonas' collection for a doc with the given userId.
     const snapshot = await admin
       .firestore()
-      .collection("learnerPersonas")
+      .collection("learnerPersonas") // Make sure this matches your actual Firestore collection name exactly (case-sensitive).
       .where("userId", "==", userId)
       .limit(1)
       .get();
 
+    // If no doc found for this user, we default isOnboarded => false.
     if (snapshot.empty) {
-      return res.status(404).json({
-        success: false,
-        error: "No learnerPersona found for this user.",
+      return res.json({
+        success: true,
+        data: { isOnboarded: false },
       });
     }
 
-    // We got at least one doc
-    const doc = snapshot.docs[0]; 
-    const data = doc.data();
+    // Grab the first matching doc (limit(1)).
+    const doc = snapshot.docs[0];
+    const data = doc.data() || {};
+
+    // Use double-bang (!!) to ensure we end up with a strict boolean.
+    // If data.isOnboarded is truthy, isOnboarded is true; otherwise false.
+    const isOnboarded = !!data.isOnboarded;
 
     return res.json({
       success: true,
-      data: {
-        isOnboarded: data.isOnboarded,
-      },
+      data: { isOnboarded },
     });
   } catch (err) {
     console.error("Error fetching learnerPersona:", err);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       error: "Server error fetching learnerPersona.",
     });
