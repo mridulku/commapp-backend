@@ -2065,15 +2065,22 @@ app.get("/api/adaptive-plan-id", async (req, res) => {
 
 app.get("/api/adaptive-plans", async (req, res) => {
   try {
-    const { userId } = req.query;
+    const { userId, bookId } = req.query;
+
     if (!userId) {
       return res.status(400).json({ error: "Missing userId in query." });
     }
 
-    // Query Firestore from server side
-    const collRef = db.collection("adaptive_demo");
-    const snap = await collRef.where("userId", "==", userId).get();
+    // Start with a base query for userId
+    let query = db.collection("adaptive_demo").where("userId", "==", userId);
 
+    // If bookId is provided, extend the query to also match the bookId
+    if (bookId) {
+      query = query.where("bookId", "==", bookId);
+    }
+
+    // Execute the query
+    const snap = await query.get();
     const plans = [];
     snap.forEach((doc) => {
       plans.push({ id: doc.id, ...doc.data() });
@@ -2104,10 +2111,26 @@ app.get("/api/books-user", async (req, res) => {
       .get();
 
     const books = snapshot.docs.map((doc) => {
+      const data = doc.data();
+
+      // Convert Firestore Timestamp to a string (ISO 8601), or fallback
+      let createdAtString = null;
+      if (data.createdAt && data.createdAt.toDate) {
+        // If it's an actual Firestore Timestamp field
+        createdAtString = data.createdAt.toDate().toISOString();
+      } else {
+        // Fallback to Firestore doc metadata's createTime if no custom createdAt
+        createdAtString = doc.createTime
+          ? doc.createTime.toDate().toISOString()
+          : null;
+      }
+
       return {
         // doc.id is the Firestore document ID
         id: doc.id,
-        ...doc.data(),
+        ...data,
+        // Force the createdAt field to be a plain string for the frontend
+        createdAt: createdAtString,
       };
     });
 
