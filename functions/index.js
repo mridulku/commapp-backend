@@ -2388,3 +2388,402 @@ exports.generateBookPlan = onRequest(async (req, res) => {
     return res.status(500).json({ error: error.message });
   }
 });
+
+
+
+
+exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
+  // ---------------- CORS HEADERS ----------------
+  res.set("Access-Control-Allow-Origin", "*"); // or restrict domain
+  res.set("Access-Control-Allow-Headers", "Content-Type,Authorization");
+  res.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+
+  // Handle preflight
+  if (req.method === "OPTIONS") {
+    return res.status(204).send("");
+  }
+
+  try {
+    // ---------------------------------------------------------
+    // A) Basic Required Input
+    // ---------------------------------------------------------
+    const userId = req.query.userId || req.body.userId;
+    if (!userId) {
+      return res.status(400).json({ error: "Missing userId." });
+    }
+
+    const targetDateStr = req.query.targetDate || req.body.targetDate;
+    if (!targetDateStr) {
+      return res.status(400).json({ error: "Missing targetDate." });
+    }
+
+    const targetDate = new Date(targetDateStr);
+    if (isNaN(targetDate.getTime())) {
+      return res.status(400).json({ error: "Invalid targetDate format." });
+    }
+
+    // Current date => used to default maxDayCount
+    const today = new Date();
+    let defaultMaxDayCount = getDaysBetween(today, targetDate);
+    if (defaultMaxDayCount < 0) defaultMaxDayCount = 0;
+
+    // ---------------------------------------------------------
+    // B) Optional Overrides
+    // ---------------------------------------------------------
+    const maxDaysOverride =
+      req.body.maxDays !== undefined ? Number(req.body.maxDays) : null;
+    const wpmOverride =
+      req.body.wpm !== undefined ? Number(req.body.wpm) : null;
+    const dailyReadingTimeOverride =
+      req.body.dailyReadingTime !== undefined
+        ? Number(req.body.dailyReadingTime)
+        : null;
+    const quizTimeOverride =
+      req.body.quizTime !== undefined ? Number(req.body.quizTime) : 1;
+    const reviseTimeOverride =
+      req.body.reviseTime !== undefined ? Number(req.body.reviseTime) : 1;
+
+    // The plan type or knowledge+goal combo
+    // e.g. "none-basic", "some-advanced", etc.
+    const level = req.body.planType || "none-basic";
+
+    // optional arrays for filtering
+    const selectedBooks = Array.isArray(req.body.selectedBooks)
+      ? req.body.selectedBooks
+      : null;
+    const selectedChapters = Array.isArray(req.body.selectedChapters)
+      ? req.body.selectedChapters
+      : null;
+    const selectedSubChapters = Array.isArray(req.body.selectedSubChapters)
+      ? req.body.selectedSubChapters
+      : null;
+
+    const singleBookIdFromBody = req.body.bookId || "";
+
+    // ---------------------------------------------------------
+    // C) Fetch Persona for wpm/dailyReadingTime
+    // ---------------------------------------------------------
+    const personaSnap = await db
+      .collection("learnerPersonas")
+      .where("userId", "==", userId)
+      .limit(1)
+      .get();
+    if (personaSnap.empty) {
+      return res.status(404).json({
+        error: `No learner persona found for userId: ${userId}`,
+      });
+    }
+    const personaData = personaSnap.docs[0].data() || {};
+    if (!personaData.wpm || !personaData.dailyReadingTime) {
+      return res.status(400).json({
+        error: "Persona doc must have 'wpm' and 'dailyReadingTime'.",
+      });
+    }
+
+    // final wpm/dailyTime
+    const finalWpm = wpmOverride || personaData.wpm;
+    const finalDailyReadingTime =
+      dailyReadingTimeOverride || personaData.dailyReadingTime;
+
+    // maxDayCount
+    let maxDayCount =
+      maxDaysOverride !== null ? maxDaysOverride : defaultMaxDayCount;
+
+    // ---------------------------------------------------------
+    // D) Fetch Books
+    // ---------------------------------------------------------
+    let arrayOfBookIds = [];
+    if (selectedBooks && selectedBooks.length > 0) {
+      arrayOfBookIds = selectedBooks;
+    } else if (singleBookIdFromBody) {
+      arrayOfBookIds = [singleBookIdFromBody];
+    }
+
+    let booksSnap;
+    if (arrayOfBookIds.length > 0) {
+      booksSnap = await db
+        .collection("books_demo")
+        .where(admin.firestore.FieldPath.documentId(), "in", arrayOfBookIds)
+        .get();
+    } else {
+      booksSnap = await db.collection("books_demo").get();
+    }
+
+    const booksData = [];
+    for (const bookDoc of booksSnap.docs) {
+      const bookId = bookDoc.id;
+      const book = { id: bookId, ...bookDoc.data() };
+
+      // E) fetch chapters
+      let chaptersSnap;
+      if (selectedChapters && selectedChapters.length > 0) {
+        chaptersSnap = await db
+          .collection("chapters_demo")
+          .where("bookId", "==", bookId)
+          .where(admin.firestore.FieldPath.documentId(), "in", selectedChapters)
+          .get();
+      } else {
+        chaptersSnap = await db
+          .collection("chapters_demo")
+          .where("bookId", "==", bookId)
+          .get();
+      }
+
+      const chaptersData = [];
+      for (const chapterDoc of chaptersSnap.docs) {
+        const chapterId = chapterDoc.id;
+        const chapter = { id: chapterId, ...chapterDoc.data() };
+
+        // F) fetch subchapters
+        let subSnap;
+        if (selectedSubChapters && selectedSubChapters.length > 0) {
+          subSnap = await db
+            .collection("subchapters_demo")
+            .where("chapterId", "==", chapterId)
+            .where(
+              admin.firestore.FieldPath.documentId(),
+              "in",
+              selectedSubChapters
+            )
+            .get();
+        } else {
+          subSnap = await db
+            .collection("subchapters_demo")
+            .where("chapterId", "==", chapterId)
+            .get();
+        }
+
+        const subData = subSnap.docs.map((d) => ({
+          id: d.id,
+          ...d.data(),
+        }));
+
+        // sort subchapters
+        chapter.subchapters = sortByNameWithNumericAware(subData);
+        chaptersData.push(chapter);
+      }
+      // sort chapters
+      book.chapters = sortByNameWithNumericAware(chaptersData);
+      booksData.push(book);
+    }
+
+    // ---------------------------------------------------------
+    // G) Build a Single Ordered Array of Activities
+    // ---------------------------------------------------------
+    const { startStage, finalStage } = mapPlanTypeToStages(level);
+
+    const allActivities = [];
+    for (const book of booksData) {
+      if (!book.chapters) continue;
+      for (const chapter of book.chapters) {
+        if (!chapter.subchapters) continue;
+        for (const sub of chapter.subchapters) {
+          const userCurrentStage = sub.currentStage || "none";
+
+          // Build tasks for this sub-chapter
+          const subActivities = getActivitiesForSub2(
+            sub,
+            {
+              userCurrentStage,
+              startStage,
+              finalStage,
+              wpm: finalWpm,
+              quizTime: quizTimeOverride,
+              reviseTime: reviseTimeOverride,
+            }
+          );
+
+          // Attach plan info + subChapterId
+          for (const activity of subActivities) {
+            allActivities.push({
+              ...activity,
+              level,             // The plan type
+              bookId: book.id,
+              bookName: book.name || "",
+              chapterId: chapter.id,
+              chapterName: chapter.name || "",
+              subChapterId: sub.id, // ensure we store subchapter ID
+              subChapterName: sub.name || "",
+            });
+          }
+        }
+      }
+    }
+
+    // ---------------------------------------------------------
+    // H) Distribute into Sessions (Day X)
+    // ---------------------------------------------------------
+    const dailyTimeMins = finalDailyReadingTime;
+    let dayIndex = 1;
+    let currentDayTime = 0;
+    let currentDayActivities = [];
+    const sessions = [];
+
+    function pushCurrentDay() {
+      if (currentDayActivities.length > 0) {
+        sessions.push({
+          sessionLabel: dayIndex.toString(),
+          activities: [...currentDayActivities],
+        });
+        dayIndex += 1;
+        currentDayTime = 0;
+        currentDayActivities = [];
+      }
+    }
+
+    for (const activity of allActivities) {
+      if (dayIndex > maxDayCount && maxDayCount > 0) {
+        break;
+      }
+
+      if (
+        currentDayTime + activity.timeNeeded > dailyTimeMins &&
+        currentDayTime > 0
+      ) {
+        pushCurrentDay();
+      }
+
+      currentDayActivities.push(activity);
+      currentDayTime += activity.timeNeeded;
+    }
+    if (currentDayActivities.length > 0) {
+      pushCurrentDay();
+    }
+
+    // ---------------------------------------------------------
+    // I) Write Plan to Firestore
+    // ---------------------------------------------------------
+    let singleBookId = "";
+    if (singleBookIdFromBody) {
+      singleBookId = singleBookIdFromBody;
+    } else if (selectedBooks && selectedBooks.length > 0) {
+      singleBookId = selectedBooks[0];
+    }
+
+    const planDoc = {
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      planName: `Adaptive Plan (v2) for User ${userId}`,
+      userId,
+      targetDate: targetDateStr,
+      sessions,
+      maxDayCount,
+      wpmUsed: finalWpm,
+      dailyReadingTimeUsed: finalDailyReadingTime,
+      level,
+      bookId: singleBookId,
+    };
+
+    const newRef = await db.collection("adaptive_demo").add(planDoc);
+
+    return res.status(200).json({
+      message: "Successfully generated plan in 'adaptive_demo'.",
+      planId: newRef.id,
+      planDoc,
+    });
+  } catch (error) {
+    logger.error("Error generating adaptive plan v2", error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+function mapPlanTypeToStages(planType) {
+  // Could be your 3×3 combos:
+  // e.g. "none-basic", "none-moderate", "none-advanced",
+  //      "some-basic", etc.
+  // Return { startStage, finalStage }
+
+  switch (planType) {
+    case "none-basic":
+      return { startStage: "remember", finalStage: "understand" };
+    case "none-moderate":
+      return { startStage: "remember", finalStage: "apply" };
+    case "none-advanced":
+      return { startStage: "remember", finalStage: "analyze" };
+    case "some-basic":
+      return { startStage: "understand", finalStage: "understand" };
+    case "some-moderate":
+      return { startStage: "understand", finalStage: "apply" };
+    case "some-advanced":
+      return { startStage: "understand", finalStage: "analyze" };
+    case "strong-basic":
+      return { startStage: "understand", finalStage: "understand" };
+    case "strong-moderate":
+      return { startStage: "apply", finalStage: "apply" };
+    case "strong-advanced":
+      return { startStage: "analyze", finalStage: "analyze" };
+    default:
+      // fallback
+      return { startStage: "remember", finalStage: "understand" };
+  }
+}
+
+
+
+function getActivitiesForSub2(sub, {
+  userCurrentStage,   // e.g. "none" | "remember" | "understand" | ...
+  startStage,         // from mapPlanTypeToStages
+  finalStage,
+  wpm,
+  quizTime,
+  reviseTime
+}) {
+  // 1) Convert these stages to numeric indices for easy comparison, e.g.:
+  // none=0, remember=1, understand=2, apply=3, analyze=4
+  const stageIndex = stageToNumber(userCurrentStage);
+  const startIndex = stageToNumber(startStage);
+  const finalIndex = stageToNumber(finalStage);
+
+  // 2) if stageIndex >= finalIndex => user is beyond the final => no tasks
+  if (stageIndex >= finalIndex) {
+    return [];
+  }
+
+  // 3) We'll build an array of tasks. 
+  // For each stage from max(stageIndex+1, startIndex) up to finalIndex
+  // we add a QUIZ + REVISE. 
+  // If you also do reading, you might add it if they are behind "remember," etc.
+  const tasks = [];
+
+  let currentNeededStart = Math.max(stageIndex + 1, startIndex);
+  for (let st = currentNeededStart; st <= finalIndex; st++) {
+    // We skip reading if st>1 and user claims strong knowledge, etc. 
+    // Or if you want to do reading for st=1 => "remember" only, up to you.
+
+    // always add QUIZ(st)
+    tasks.push({
+      type: "QUIZ",
+      quizStage: numberToStage(st),
+      timeNeeded: quizTime, 
+    });
+    // always add REVISE(st)
+    tasks.push({
+      type: "REVISE",
+      reviseStage: numberToStage(st),
+      timeNeeded: reviseTime,
+    });
+  }
+  return tasks;
+}
+
+// Example stageToNumber / numberToStage
+function stageToNumber(s) {
+  switch (s) {
+    case "none": return 0;
+    case "remember": return 1;
+    case "understand": return 2;
+    case "apply": return 3;
+    case "analyze": return 4;
+    default: return 0;
+  }
+}
+
+function numberToStage(n) {
+  switch (n) {
+    case 1: return "remember";
+    case 2: return "understand";
+    case 3: return "apply";
+    case 4: return "analyze";
+    default: return "none";
+  }
+}
+
