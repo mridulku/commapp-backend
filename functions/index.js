@@ -2392,21 +2392,155 @@ exports.generateBookPlan = onRequest(async (req, res) => {
 
 
 
+/**
+ * getActivitiesForSub2
+ * --------------------
+ * Builds an array of tasks (READ, QUIZ, REVISE) for sub-chapter
+ * from userCurrentStage up to finalStage. 
+ *
+ * - If user is behind "remember", add a READ activity (time depends on sub-chapter word count or a default).
+ * - Then for each stage in [remember..finalStage], add QUIZ + REVISE with time=5 each, 
+ *   but only if we haven't passed that stage.
+ */
+
+
+
+// Example placeholders (replace with real code as needed):
+function getDaysBetween(d1, d2) {
+  const msPerDay = 24 * 60 * 60 * 1000;
+  return Math.ceil((d2 - d1) / msPerDay);
+}
+
+
+
+function mapPlanTypeToStages(planType) {
+  // planType might be "none-basic", "some-moderate", "strong-advanced", etc.
+  switch (planType) {
+    // ----- none + (basic|moderate|advanced) -----
+    case "none-basic":
+      return { startStage: "remember", finalStage: "understand" };
+    case "none-moderate":
+      return { startStage: "remember", finalStage: "apply" };
+    case "none-advanced":
+      return { startStage: "remember", finalStage: "analyze" };
+
+    // ----- some + (basic|moderate|advanced) -----
+    case "some-basic":
+      // user claims partial knowledge => start at "understand"
+      // goal is "basic" => final => "understand"
+      return { startStage: "understand", finalStage: "understand" };
+    case "some-moderate":
+      return { startStage: "understand", finalStage: "apply" };
+    case "some-advanced":
+      return { startStage: "understand", finalStage: "analyze" };
+
+    // ----- strong + (basic|moderate|advanced) -----
+    case "strong-basic":
+      // user claims strong knowledge => start at "apply"
+      // for "basic," final is "understand," but that might not make sense 
+      // if "apply" is actually a higher stage than "understand."
+      // If you want to skip or invert that logic, adjust accordingly.
+      // For example, you might do start="apply", final="apply" if "basic" is truly lower
+      return { startStage: "apply", finalStage: "apply" };
+
+    case "strong-moderate":
+      return { startStage: "apply", finalStage: "apply" };
+    case "strong-advanced":
+      return { startStage: "apply", finalStage: "analyze" };
+
+    // fallback
+    default:
+      // If you have an unrecognized planType, 
+      // just assume from "remember" to "analyze" as a catch-all
+      return { startStage: "remember", finalStage: "analyze" };
+  }
+}
+
+// Stage helpers
+function stageToNumber(s) {
+  switch (s) {
+    case "none": return 0;
+    case "remember": return 1;
+    case "understand": return 2;
+    case "apply": return 3;
+    case "analyze": return 4;
+    default: return 0;
+  }
+}
+function numberToStage(n) {
+  switch (n) {
+    case 1: return "remember";
+    case 2: return "understand";
+    case 3: return "apply";
+    case 4: return "analyze";
+    default: return "none";
+  }
+}
+
+/**
+ * getActivitiesForSub2 (No REVISE tasks)
+ * --------------------------------------
+ *  - If user is behind "remember," add READ.
+ *  - Then for each stage from current+1..final, add QUIZ only (no revise).
+ */
+function getActivitiesForSub2(sub, {
+  userCurrentStage,   // e.g. "none"|"remember"|"understand"|"apply"|"analyze"
+  startStage,
+  finalStage,
+  wpm,
+  quizTime = 5
+}) {
+  const stageIndex = stageToNumber(userCurrentStage);
+  const startIndex = stageToNumber(startStage);
+  const finalIndex = stageToNumber(finalStage);
+
+  // If user is beyond final => no tasks
+  if (stageIndex >= finalIndex) {
+    return [];
+  }
+
+  const tasks = [];
+
+  // A) If user is behind "remember", add READ
+  if (stageIndex < 1 && startIndex <= 1) {
+    // reading time logic
+    const readTime = sub.wordCount 
+      ? Math.ceil(sub.wordCount / wpm)
+      : 5;
+    tasks.push({
+      type: "READ",
+      timeNeeded: readTime
+    });
+  }
+
+  // B) For each stage from max(stageIndex+1, startIndex) up to finalIndex => QUIZ only
+  let currentNeededStart = Math.max(stageIndex + 1, startIndex);
+  for (let st = currentNeededStart; st <= finalIndex; st++) {
+    tasks.push({
+      type: "QUIZ",
+      quizStage: numberToStage(st),
+      timeNeeded: quizTime
+    });
+  }
+
+  return tasks;
+}
+
+
+// The main plan generation function
 exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
-  // ---------------- CORS HEADERS ----------------
-  res.set("Access-Control-Allow-Origin", "*"); // or restrict domain
+  res.set("Access-Control-Allow-Origin", "*");
   res.set("Access-Control-Allow-Headers", "Content-Type,Authorization");
   res.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
 
-  // Handle preflight
   if (req.method === "OPTIONS") {
     return res.status(204).send("");
   }
 
   try {
-    // ---------------------------------------------------------
-    // A) Basic Required Input
-    // ---------------------------------------------------------
+    // ------------------------------------------------------
+    // A) Basic Input
+    // ------------------------------------------------------
     const userId = req.query.userId || req.body.userId;
     if (!userId) {
       return res.status(400).json({ error: "Missing userId." });
@@ -2416,82 +2550,57 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     if (!targetDateStr) {
       return res.status(400).json({ error: "Missing targetDate." });
     }
-
     const targetDate = new Date(targetDateStr);
     if (isNaN(targetDate.getTime())) {
       return res.status(400).json({ error: "Invalid targetDate format." });
     }
 
-    // Current date => used to default maxDayCount
     const today = new Date();
     let defaultMaxDayCount = getDaysBetween(today, targetDate);
     if (defaultMaxDayCount < 0) defaultMaxDayCount = 0;
 
-    // ---------------------------------------------------------
-    // B) Optional Overrides
-    // ---------------------------------------------------------
-    const maxDaysOverride =
-      req.body.maxDays !== undefined ? Number(req.body.maxDays) : null;
-    const wpmOverride =
-      req.body.wpm !== undefined ? Number(req.body.wpm) : null;
-    const dailyReadingTimeOverride =
-      req.body.dailyReadingTime !== undefined
-        ? Number(req.body.dailyReadingTime)
-        : null;
-    const quizTimeOverride =
-      req.body.quizTime !== undefined ? Number(req.body.quizTime) : 1;
-    const reviseTimeOverride =
-      req.body.reviseTime !== undefined ? Number(req.body.reviseTime) : 1;
+    // ------------------------------------------------------
+    // B) Optional overrides
+    // ------------------------------------------------------
+    const maxDaysOverride = (req.body.maxDays !== undefined) ? Number(req.body.maxDays) : null;
+    const wpmOverride = (req.body.wpm !== undefined) ? Number(req.body.wpm) : null;
+    const dailyReadingTimeOverride = (req.body.dailyReadingTime !== undefined)
+      ? Number(req.body.dailyReadingTime)
+      : null;
 
-    // The plan type or knowledge+goal combo
-    // e.g. "none-basic", "some-advanced", etc.
+    // We fix quizTime=5 by default (no revise)
+    const quizTimeOverride = (req.body.quizTime !== undefined) ? Number(req.body.quizTime) : 5;
+
     const level = req.body.planType || "none-basic";
 
-    // optional arrays for filtering
-    const selectedBooks = Array.isArray(req.body.selectedBooks)
-      ? req.body.selectedBooks
-      : null;
-    const selectedChapters = Array.isArray(req.body.selectedChapters)
-      ? req.body.selectedChapters
-      : null;
-    const selectedSubChapters = Array.isArray(req.body.selectedSubChapters)
-      ? req.body.selectedSubChapters
-      : null;
-
+    const selectedBooks = Array.isArray(req.body.selectedBooks) ? req.body.selectedBooks : null;
+    const selectedChapters = Array.isArray(req.body.selectedChapters) ? req.body.selectedChapters : null;
+    const selectedSubChapters = Array.isArray(req.body.selectedSubChapters) ? req.body.selectedSubChapters : null;
     const singleBookIdFromBody = req.body.bookId || "";
 
-    // ---------------------------------------------------------
-    // C) Fetch Persona for wpm/dailyReadingTime
-    // ---------------------------------------------------------
+    // ------------------------------------------------------
+    // C) Fetch Persona
+    // ------------------------------------------------------
     const personaSnap = await db
       .collection("learnerPersonas")
       .where("userId", "==", userId)
       .limit(1)
       .get();
     if (personaSnap.empty) {
-      return res.status(404).json({
-        error: `No learner persona found for userId: ${userId}`,
-      });
+      return res.status(404).json({ error: `No learner persona found for userId: ${userId}` });
     }
     const personaData = personaSnap.docs[0].data() || {};
     if (!personaData.wpm || !personaData.dailyReadingTime) {
-      return res.status(400).json({
-        error: "Persona doc must have 'wpm' and 'dailyReadingTime'.",
-      });
+      return res.status(400).json({ error: "Persona doc must have 'wpm' and 'dailyReadingTime'." });
     }
 
-    // final wpm/dailyTime
     const finalWpm = wpmOverride || personaData.wpm;
-    const finalDailyReadingTime =
-      dailyReadingTimeOverride || personaData.dailyReadingTime;
+    const finalDailyReadingTime = dailyReadingTimeOverride || personaData.dailyReadingTime;
+    let maxDayCount = (maxDaysOverride !== null) ? maxDaysOverride : defaultMaxDayCount;
 
-    // maxDayCount
-    let maxDayCount =
-      maxDaysOverride !== null ? maxDaysOverride : defaultMaxDayCount;
-
-    // ---------------------------------------------------------
+    // ------------------------------------------------------
     // D) Fetch Books
-    // ---------------------------------------------------------
+    // ------------------------------------------------------
     let arrayOfBookIds = [];
     if (selectedBooks && selectedBooks.length > 0) {
       arrayOfBookIds = selectedBooks;
@@ -2540,11 +2649,7 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
           subSnap = await db
             .collection("subchapters_demo")
             .where("chapterId", "==", chapterId)
-            .where(
-              admin.firestore.FieldPath.documentId(),
-              "in",
-              selectedSubChapters
-            )
+            .where(admin.firestore.FieldPath.documentId(), "in", selectedSubChapters)
             .get();
         } else {
           subSnap = await db
@@ -2553,26 +2658,22 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
             .get();
         }
 
-        const subData = subSnap.docs.map((d) => ({
-          id: d.id,
-          ...d.data(),
-        }));
+        const subData = subSnap.docs.map(d => ({ id: d.id, ...d.data() }));
 
         // sort subchapters
         chapter.subchapters = sortByNameWithNumericAware(subData);
         chaptersData.push(chapter);
       }
-      // sort chapters
       book.chapters = sortByNameWithNumericAware(chaptersData);
       booksData.push(book);
     }
 
-    // ---------------------------------------------------------
-    // G) Build a Single Ordered Array of Activities
-    // ---------------------------------------------------------
+    // ------------------------------------------------------
+    // G) Build array of tasks (READ + QUIZ, no revise)
+    // ------------------------------------------------------
     const { startStage, finalStage } = mapPlanTypeToStages(level);
-
     const allActivities = [];
+
     for (const book of booksData) {
       if (!book.chapters) continue;
       for (const chapter of book.chapters) {
@@ -2580,79 +2681,113 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
         for (const sub of chapter.subchapters) {
           const userCurrentStage = sub.currentStage || "none";
 
-          // Build tasks for this sub-chapter
-          const subActivities = getActivitiesForSub2(
-            sub,
-            {
-              userCurrentStage,
-              startStage,
-              finalStage,
-              wpm: finalWpm,
-              quizTime: quizTimeOverride,
-              reviseTime: reviseTimeOverride,
-            }
-          );
-
-          // Attach plan info + subChapterId
-          for (const activity of subActivities) {
+          // We only do reading + quiz (no revise)
+          const subActs = getActivitiesForSub2(sub, {
+            userCurrentStage,
+            startStage,
+            finalStage,
+            wpm: finalWpm,
+            quizTime: quizTimeOverride
+          });
+          for (const act of subActs) {
             allActivities.push({
-              ...activity,
-              level,             // The plan type
+              ...act,
+              level,
               bookId: book.id,
               bookName: book.name || "",
               chapterId: chapter.id,
               chapterName: chapter.name || "",
-              subChapterId: sub.id, // ensure we store subchapter ID
-              subChapterName: sub.name || "",
+              subChapterId: sub.id,
+              subChapterName: sub.name || ""
             });
           }
         }
       }
     }
 
-    // ---------------------------------------------------------
-    // H) Distribute into Sessions (Day X)
-    // ---------------------------------------------------------
+    // ------------------------------------------------------
+    // H) Distribute into sessions => prefer 1 activity/subChapter,
+    //    fallback to fill leftover if no new subchap can fit
+    // ------------------------------------------------------
     const dailyTimeMins = finalDailyReadingTime;
     let dayIndex = 1;
-    let currentDayTime = 0;
-    let currentDayActivities = [];
     const sessions = [];
 
-    function pushCurrentDay() {
-      if (currentDayActivities.length > 0) {
+    let pendingTasks = [...allActivities];
+
+    function buildNextDay() {
+      return {
+        sessionLabel: dayIndex.toString(),
+        activities: [],
+        timeUsed: 0,
+        usedSubs: new Set()
+      };
+    }
+    let currentDay = buildNextDay();
+
+    function finalizeDay() {
+      if (currentDay.activities.length > 0) {
         sessions.push({
-          sessionLabel: dayIndex.toString(),
-          activities: [...currentDayActivities],
+          sessionLabel: currentDay.sessionLabel,
+          activities: currentDay.activities
         });
-        dayIndex += 1;
-        currentDayTime = 0;
-        currentDayActivities = [];
+        dayIndex++;
+      }
+      currentDay = buildNextDay();
+    }
+
+    while (pendingTasks.length > 0 && dayIndex <= maxDayCount) {
+      let placed = false;
+
+      // Try new sub-chapter first
+      for (let i = 0; i < pendingTasks.length; i++) {
+        const t = pendingTasks[i];
+        const actTime = t.timeNeeded || 1;
+        const leftover = dailyTimeMins - currentDay.timeUsed;
+        if (actTime <= leftover && !currentDay.usedSubs.has(t.subChapterId)) {
+          // place
+          currentDay.activities.push(t);
+          currentDay.timeUsed += actTime;
+          currentDay.usedSubs.add(t.subChapterId);
+          pendingTasks.splice(i, 1);
+          placed = true;
+          break;
+        }
+      }
+
+      if (!placed) {
+        // fallback => see if we can place same sub-chapter again to fill leftover
+        let placedSame = false;
+        for (let i = 0; i < pendingTasks.length; i++) {
+          const t = pendingTasks[i];
+          const actTime = t.timeNeeded || 1;
+          const leftover = dailyTimeMins - currentDay.timeUsed;
+          if (actTime <= leftover) {
+            currentDay.activities.push(t);
+            currentDay.timeUsed += actTime;
+            currentDay.usedSubs.add(t.subChapterId);
+            pendingTasks.splice(i, 1);
+            placedSame = true;
+            break;
+          }
+        }
+        if (!placedSame) {
+          // no tasks fit leftover => finalize day
+          finalizeDay();
+        }
+      }
+
+      if (currentDay.timeUsed >= dailyTimeMins) {
+        finalizeDay();
       }
     }
 
-    for (const activity of allActivities) {
-      if (dayIndex > maxDayCount && maxDayCount > 0) {
-        break;
-      }
-
-      if (
-        currentDayTime + activity.timeNeeded > dailyTimeMins &&
-        currentDayTime > 0
-      ) {
-        pushCurrentDay();
-      }
-
-      currentDayActivities.push(activity);
-      currentDayTime += activity.timeNeeded;
-    }
-    if (currentDayActivities.length > 0) {
-      pushCurrentDay();
+    // finalize last day
+    if (currentDay.activities.length > 0 && dayIndex <= maxDayCount) {
+      finalizeDay();
     }
 
-    // ---------------------------------------------------------
-    // I) Write Plan to Firestore
-    // ---------------------------------------------------------
+    // I) Write planDoc
     let singleBookId = "";
     if (singleBookIdFromBody) {
       singleBookId = singleBookIdFromBody;
@@ -2670,7 +2805,7 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
       wpmUsed: finalWpm,
       dailyReadingTimeUsed: finalDailyReadingTime,
       level,
-      bookId: singleBookId,
+      bookId: singleBookId
     };
 
     const newRef = await db.collection("adaptive_demo").add(planDoc);
@@ -2678,112 +2813,12 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     return res.status(200).json({
       message: "Successfully generated plan in 'adaptive_demo'.",
       planId: newRef.id,
-      planDoc,
+      planDoc
     });
   } catch (error) {
-    logger.error("Error generating adaptive plan v2", error);
+    console.error("Error generating adaptive plan v2:", error);
     return res.status(500).json({ error: error.message });
   }
 });
 
-function mapPlanTypeToStages(planType) {
-  // Could be your 3×3 combos:
-  // e.g. "none-basic", "none-moderate", "none-advanced",
-  //      "some-basic", etc.
-  // Return { startStage, finalStage }
-
-  switch (planType) {
-    case "none-basic":
-      return { startStage: "remember", finalStage: "understand" };
-    case "none-moderate":
-      return { startStage: "remember", finalStage: "apply" };
-    case "none-advanced":
-      return { startStage: "remember", finalStage: "analyze" };
-    case "some-basic":
-      return { startStage: "understand", finalStage: "understand" };
-    case "some-moderate":
-      return { startStage: "understand", finalStage: "apply" };
-    case "some-advanced":
-      return { startStage: "understand", finalStage: "analyze" };
-    case "strong-basic":
-      return { startStage: "understand", finalStage: "understand" };
-    case "strong-moderate":
-      return { startStage: "apply", finalStage: "apply" };
-    case "strong-advanced":
-      return { startStage: "analyze", finalStage: "analyze" };
-    default:
-      // fallback
-      return { startStage: "remember", finalStage: "understand" };
-  }
-}
-
-
-
-function getActivitiesForSub2(sub, {
-  userCurrentStage,   // e.g. "none" | "remember" | "understand" | ...
-  startStage,         // from mapPlanTypeToStages
-  finalStage,
-  wpm,
-  quizTime,
-  reviseTime
-}) {
-  // 1) Convert these stages to numeric indices for easy comparison, e.g.:
-  // none=0, remember=1, understand=2, apply=3, analyze=4
-  const stageIndex = stageToNumber(userCurrentStage);
-  const startIndex = stageToNumber(startStage);
-  const finalIndex = stageToNumber(finalStage);
-
-  // 2) if stageIndex >= finalIndex => user is beyond the final => no tasks
-  if (stageIndex >= finalIndex) {
-    return [];
-  }
-
-  // 3) We'll build an array of tasks. 
-  // For each stage from max(stageIndex+1, startIndex) up to finalIndex
-  // we add a QUIZ + REVISE. 
-  // If you also do reading, you might add it if they are behind "remember," etc.
-  const tasks = [];
-
-  let currentNeededStart = Math.max(stageIndex + 1, startIndex);
-  for (let st = currentNeededStart; st <= finalIndex; st++) {
-    // We skip reading if st>1 and user claims strong knowledge, etc. 
-    // Or if you want to do reading for st=1 => "remember" only, up to you.
-
-    // always add QUIZ(st)
-    tasks.push({
-      type: "QUIZ",
-      quizStage: numberToStage(st),
-      timeNeeded: quizTime, 
-    });
-    // always add REVISE(st)
-    tasks.push({
-      type: "REVISE",
-      reviseStage: numberToStage(st),
-      timeNeeded: reviseTime,
-    });
-  }
-  return tasks;
-}
-
-// Example stageToNumber / numberToStage
-function stageToNumber(s) {
-  switch (s) {
-    case "none": return 0;
-    case "remember": return 1;
-    case "understand": return 2;
-    case "apply": return 3;
-    case "analyze": return 4;
-    default: return 0;
-  }
-}
-
-function numberToStage(n) {
-  switch (n) {
-    case 1: return "remember";
-    case 2: return "understand";
-    case 3: return "apply";
-    case 4: return "analyze";
-    default: return "none";
-  }
-}
 
