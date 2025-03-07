@@ -2577,6 +2577,106 @@ app.post("/api/learner-personas/onboard", async (req, res) => {
   }
 });
 
+
+app.get("/api/getPrompt", async (req, res) => {
+  try {
+    // 1) read promptKey from query
+    const { promptKey } = req.query;
+    if (!promptKey) {
+      return res.status(400).json({ error: "Missing promptKey in query" });
+    }
+
+    // 2) fetch from Firestore
+    const collRef = db.collection("prompts");
+    const snap = await collRef.where("promptKey", "==", promptKey).limit(1).get();
+
+    if (snap.empty) {
+      return res.status(404).json({ error: "Prompt not found." });
+    }
+
+    // 3) Return the first doc found
+    const doc = snap.docs[0];
+    const docData = doc.data();
+
+    return res.json({
+      prompt: {
+        docId: doc.id,
+        promptKey: docData.promptKey,
+        promptText: docData.promptText,
+      },
+    });
+  } catch (err) {
+    console.error("GET /api/getPrompt => error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+
+// e.g. in Express
+app.get("/api/userActivities", async (req, res) => {
+  try {
+    const { subChapterId } = req.query;
+    if (!subChapterId) return res.status(400).json({ error: "Missing subChapterId" });
+    
+    // Example: your Firestore collection = user__activities__demo
+    // Filter by subChapterId field. Sort descending by e.g. timestamp.
+    const snap = await db.collection("user__activities__demo")
+      .where("subChapterId", "==", subChapterId)
+      .orderBy("startTimestamp", "desc")
+      .get();
+
+    const activities = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    res.json({ activities });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
+ * POST /api/createPrompt
+ * ----------------------
+ *  - Expects JSON body: { promptKey, promptText }
+ *  - Creates new doc in 'prompts' collection
+ */
+app.post("/api/createPrompt", async (req, res) => {
+  try {
+    const { promptKey, promptText } = req.body;
+    if (!promptKey || !promptText) {
+      return res.status(400).json({ error: "Missing promptKey or promptText in body." });
+    }
+
+    // Optionally check if promptKey already exists
+    const collRef = db.collection("prompts");
+    const existing = await collRef.where("promptKey", "==", promptKey).limit(1).get();
+    if (!existing.empty) {
+      return res.status(400).json({
+        error: `A prompt with key '${promptKey}' already exists.`,
+      });
+    }
+
+    // Create new doc
+    const newDocRef = await collRef.add({
+      promptKey,
+      promptText,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.status(201).json({
+      docId: newDocRef.id,
+      message: "Prompt created successfully",
+    });
+  } catch (err) {
+    console.error("POST /api/createPrompt => error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+
+
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
