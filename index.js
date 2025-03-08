@@ -1,4 +1,7 @@
 require("dotenv").config();
+
+
+
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
@@ -23,6 +26,13 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 app.use(express.json());
+
+const OpenAI = require("openai");
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
 const firebaseServiceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT;
 const serviceAccount = JSON.parse(firebaseServiceAccountJson);
 admin.initializeApp({
@@ -2674,7 +2684,164 @@ app.post("/api/createPrompt", async (req, res) => {
 
 
 
+app.post("/revision", async (req, res) => {
+  try {
+    const { subChapterId } = req.body;
+    if (!subChapterId) {
+      return res.status(400).json({ error: "subChapterId is required" });
+    }
 
+    // 1) Fetch subchapter details
+    const subChapter = await fetchSubchapterDetails(subChapterId);
+
+    // 2) Fetch user activities
+    const activities = await fetchUserActivities(subChapterId);
+
+    // 3) Call GPT to generate revision content
+    const revisionData = await generateRevisionData(subChapter, activities);
+
+    // 4) Send the GPT-generated data as JSON back to the React frontend
+    return res.json(revisionData);
+  } catch (err) {
+    console.error("Error in POST /api/revision:", err);
+    return res.status(500).json({ error: err.message || "Server Error" });
+  }
+});
+
+/**
+ * Example function to fetch subchapter details from your DB or an internal API.
+ * Replace this with your actual logic.
+ */
+async function fetchSubchapterDetails(subChapterId) {
+  // Example: use fetch/axios if your data is in another service:
+  // const resp = await fetch(`http://localhost:3001/api/subchapters/${subChapterId}`);
+  // if (!resp.ok) throw new Error("Error fetching subchapter");
+  // return resp.json();
+
+  // Or direct DB access in Node:
+  // return db.query("SELECT * FROM subchapters WHERE id = $1", [subChapterId]);
+
+  // For now, mock:
+  return {
+    id: subChapterId,
+    name: "Mock SubChapter Name",
+    summary: "This is a mock summary for demonstration purposes.",
+  };
+}
+
+/**
+ * Example function to fetch user activities from your DB/collection.
+ */
+async function fetchUserActivities(subChapterId) {
+  // Again, replace with your real logic. For demonstration:
+  return [
+    { activityId: "a1", detail: "User tried to solve problem #1" },
+    { activityId: "a2", detail: "User completed a quiz" },
+  ];
+}
+
+/**
+ * Example function that calls GPT using openai npm package.
+ */
+async function generateRevisionData(subChapter, activities) {
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (!openaiKey) {
+    throw new Error("Missing OpenAI API key in environment (OPENAI_API_KEY)");
+  }
+
+  const config = new Configuration({ apiKey: openaiKey });
+  const openai = new OpenAIApi(config);
+
+  // Build a prompt. (Feel free to adapt from your existing prompt logic.)
+  const userPrompt = `
+You are a helpful tutor. The user is in the "apply" stage for sub-chapter: ${subChapter.name}.
+The sub-chapter content: "${subChapter.summary}"
+User activities: ${JSON.stringify(activities, null, 2)}
+
+Generate some revision suggestions or summary in plain JSON. 
+For example:
+{
+  "someKey": "someValue",
+  "anotherKey": ["list", "of", "items"]
+}
+`;
+
+  // Call GPT (Chat Completion)
+  const response = await openai.createChatCompletion({
+    model: "gpt-3.5-turbo",
+    messages: [{ role: "user", content: userPrompt }],
+    temperature: 0.7,
+  });
+
+  const gptContent = response.data.choices?.[0]?.message?.content || "";
+
+  // Possibly parse GPT content as JSON, or just return raw text:
+  let parsed;
+  try {
+    parsed = JSON.parse(gptContent.trim());
+  } catch (err) {
+    // If GPT doesn't return valid JSON, you might decide to just return the raw text
+    // or handle the error as needed.
+    parsed = { rawText: gptContent.trim(), warning: "GPT did not return valid JSON." };
+  }
+
+  return parsed;
+}
+
+
+app.post("/api/generate", async (req, res) => {
+  try {
+    const { userId, subchapterId, prompt } = req.body;
+    if (!userId || !subchapterId || !prompt) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const db = admin.firestore();
+
+    // Fetch user activities for this user and subchapter from "user_activities_demo"
+    const activitiesSnapshot = await db.collection("user_activities_demo")
+      .where("userId", "==", userId)
+      .where("subChapterId", "==", subchapterId)  // Note the capital "C"
+      .orderBy("timestamp", "desc")
+      .get();
+
+    let activitiesText = "";
+    activitiesSnapshot.forEach(doc => {
+      const data = doc.data();
+      // Use the "content" field if available; otherwise fallback to "eventType"
+      const activityText = data.content || data.eventType || "";
+      if (activityText) {
+        activitiesText += activityText + "\n";
+      }
+    });
+
+    // Fetch subchapter summary from "subchapters_demo"
+    const subChapterDoc = await db.collection("subchapters_demo").doc(subchapterId).get();
+    let subChapterSummary = "";
+    if (subChapterDoc.exists) {
+      const subChapterData = subChapterDoc.data();
+      subChapterSummary = subChapterData.summary || "";
+    }
+
+    // Combine subchapter summary, user activities, and the user prompt into one final prompt
+    const finalPrompt = `Subchapter Summary: ${subChapterSummary}\n\nUser Activities:\n${activitiesText}\n\nUser Prompt: ${prompt}`;
+
+    // Call OpenAI API with the final prompt
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o", // Adjust model as needed
+      messages: [{ role: "user", content: finalPrompt }],
+      max_tokens: 100,
+      temperature: 0.7,
+    });
+
+    const result = response.choices[0].message.content.trim();
+
+    return res.json({ finalPrompt, result });
+  } catch (error) {
+    console.error("Error generating text:", error);
+    return res.status(500).json({ error: "Failed to generate text" });
+  }
+});
 
 
 const PORT = process.env.PORT || 3001;
