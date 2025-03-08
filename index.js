@@ -2791,14 +2791,26 @@ For example:
 
 app.post("/api/generate", async (req, res) => {
   try {
-    const { userId, subchapterId, prompt } = req.body;
-    if (!userId || !subchapterId || !prompt) {
+    const { userId, subchapterId, promptId } = req.body;
+    if (!userId || !subchapterId || !promptId) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
     const db = admin.firestore();
 
-    // Fetch user activities for this user and subchapter from "user_activities_demo"
+    // 1. Fetch the prompt text and UI configuration from "prompts"
+    const promptDoc = await db.collection("prompts").doc(promptId).get();
+    let promptText = "";
+    let UIconfig = {};
+    if (promptDoc.exists) {
+      const promptData = promptDoc.data();
+      promptText = promptData.promptText || "";
+      UIconfig = promptData.UIconfig || {};
+    } else {
+      console.warn(`No prompt document found for promptId: ${promptId}`);
+    }
+
+    // 2. Fetch user activities for this user and subchapter from "user_activities_demo"
     const activitiesSnapshot = await db.collection("user_activities_demo")
       .where("userId", "==", userId)
       .where("subChapterId", "==", subchapterId)  // Note the capital "C"
@@ -2808,40 +2820,47 @@ app.post("/api/generate", async (req, res) => {
     let activitiesText = "";
     activitiesSnapshot.forEach(doc => {
       const data = doc.data();
-      // Use the "content" field if available; otherwise fallback to "eventType"
       const activityText = data.content || data.eventType || "";
       if (activityText) {
         activitiesText += activityText + "\n";
       }
     });
 
-    // Fetch subchapter summary from "subchapters_demo"
+    // 3. Fetch subchapter summary from "subchapters_demo"
     const subChapterDoc = await db.collection("subchapters_demo").doc(subchapterId).get();
     let subChapterSummary = "";
     if (subChapterDoc.exists) {
       const subChapterData = subChapterDoc.data();
       subChapterSummary = subChapterData.summary || "";
+    } else {
+      console.warn(`No subchapter document found for subchapterId: ${subchapterId}`);
     }
 
-    // Combine subchapter summary, user activities, and the user prompt into one final prompt
-    const finalPrompt = `Subchapter Summary: ${subChapterSummary}\n\nUser Activities:\n${activitiesText}\n\nUser Prompt: ${prompt}`;
+    // 4. Construct the final prompt.
+    const finalPrompt = `Subchapter Summary: ${subChapterSummary}\n\nUser Activities:\n${activitiesText}\n\nPrompt Text: ${promptText}`;
+    console.log("Final Prompt being sent to OpenAI:", finalPrompt);
 
-    // Call OpenAI API with the final prompt
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o", // Adjust model as needed
+    // 5. Call OpenAI API.
+    const openaiResponse = await openai.chat.completions.create({
+      model: "gpt-4o", // Adjust model as needed.
       messages: [{ role: "user", content: finalPrompt }],
-      max_tokens: 100,
+      max_tokens: 1000,
       temperature: 0.7,
     });
 
-    const result = response.choices[0].message.content.trim();
+    const result = openaiResponse.choices[0].message.content.trim();
+    console.log("OpenAI result:", result);
 
-    return res.json({ finalPrompt, result });
+    // 6. Return the final prompt, GPT result, and UI configuration.
+    return res.json({ finalPrompt, result, UIconfig });
   } catch (error) {
     console.error("Error generating text:", error);
     return res.status(500).json({ error: "Failed to generate text" });
   }
 });
+
+// Start the server on port 3001 (or your chosen port)
+
 
 
 const PORT = process.env.PORT || 3001;
