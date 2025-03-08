@@ -2791,34 +2791,43 @@ For example:
 
 app.post("/api/generate", async (req, res) => {
   try {
-    const { userId, subchapterId, promptId } = req.body;
-    if (!userId || !subchapterId || !promptId) {
+    const { userId, subchapterId, promptKey } = req.body;
+    if (!userId || !subchapterId || !promptKey) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
     const db = admin.firestore();
 
-    // 1. Fetch the prompt text and UI configuration from "prompts"
-    const promptDoc = await db.collection("prompts").doc(promptId).get();
+    // 1. Fetch the prompt text and UI configuration from "prompts" by promptKey
+    const promptSnapshot = await db
+      .collection("prompts")
+      .where("promptKey", "==", promptKey)
+      .limit(1)
+      .get();
+
     let promptText = "";
     let UIconfig = {};
-    if (promptDoc.exists) {
+
+    if (!promptSnapshot.empty) {
+      // Take the first matched document
+      const promptDoc = promptSnapshot.docs[0];
       const promptData = promptDoc.data();
       promptText = promptData.promptText || "";
       UIconfig = promptData.UIconfig || {};
     } else {
-      console.warn(`No prompt document found for promptId: ${promptId}`);
+      console.warn(`No prompt document found for promptKey: ${promptKey}`);
     }
 
     // 2. Fetch user activities for this user and subchapter from "user_activities_demo"
-    const activitiesSnapshot = await db.collection("user_activities_demo")
+    const activitiesSnapshot = await db
+      .collection("user_activities_demo")
       .where("userId", "==", userId)
-      .where("subChapterId", "==", subchapterId)  // Note the capital "C"
+      .where("subChapterId", "==", subchapterId)  // Note the capital "C" if that's how it is in Firestore
       .orderBy("timestamp", "desc")
       .get();
 
     let activitiesText = "";
-    activitiesSnapshot.forEach(doc => {
+    activitiesSnapshot.forEach((doc) => {
       const data = doc.data();
       const activityText = data.content || data.eventType || "";
       if (activityText) {
@@ -2827,7 +2836,11 @@ app.post("/api/generate", async (req, res) => {
     });
 
     // 3. Fetch subchapter summary from "subchapters_demo"
-    const subChapterDoc = await db.collection("subchapters_demo").doc(subchapterId).get();
+    const subChapterDoc = await db
+      .collection("subchapters_demo")
+      .doc(subchapterId)
+      .get();
+
     let subChapterSummary = "";
     if (subChapterDoc.exists) {
       const subChapterData = subChapterDoc.data();
@@ -2836,13 +2849,13 @@ app.post("/api/generate", async (req, res) => {
       console.warn(`No subchapter document found for subchapterId: ${subchapterId}`);
     }
 
-    // 4. Construct the final prompt.
+    // 4. Construct the final prompt
     const finalPrompt = `Subchapter Summary: ${subChapterSummary}\n\nUser Activities:\n${activitiesText}\n\nPrompt Text: ${promptText}`;
     console.log("Final Prompt being sent to OpenAI:", finalPrompt);
 
-    // 5. Call OpenAI API.
+    // 5. Call OpenAI API (use whichever model you need)
     const openaiResponse = await openai.chat.completions.create({
-      model: "gpt-4o", // Adjust model as needed.
+      model: "gpt-4o", // or gpt-3.5-turbo, etc.
       messages: [{ role: "user", content: finalPrompt }],
       max_tokens: 1000,
       temperature: 0.7,
@@ -2851,7 +2864,7 @@ app.post("/api/generate", async (req, res) => {
     const result = openaiResponse.choices[0].message.content.trim();
     console.log("OpenAI result:", result);
 
-    // 6. Return the final prompt, GPT result, and UI configuration.
+    // 6. Return the final prompt, GPT result, and UI configuration
     return res.json({ finalPrompt, result, UIconfig });
   } catch (error) {
     console.error("Error generating text:", error);
