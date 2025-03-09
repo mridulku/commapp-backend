@@ -2875,15 +2875,17 @@ app.post("/api/generate", async (req, res) => {
 // Start the server on port 3001 (or your chosen port)
 
 // app.post("/api/submitQuiz", ...)
+// POST /api/submitQuiz
 app.post("/api/submitQuiz", async (req, res) => {
   try {
     const {
       userId,
       subchapterId,
       quizType,
-      quizSubmission, // the questions + user answers
+      quizSubmission,
       score,
-      totalQuestions
+      totalQuestions,
+      attemptNumber,  // NEW FIELD
     } = req.body;
 
     if (!userId || !subchapterId || !quizType || !quizSubmission || !score) {
@@ -2892,16 +2894,16 @@ app.post("/api/submitQuiz", async (req, res) => {
 
     const db = admin.firestore();
 
-    // We'll store the record in "quizzes_demo"
-    // Use an auto-generated doc ID (or you can define a custom ID)
+    // Add a new doc in quizzes_demo with the attemptNumber
     const docRef = await db.collection("quizzes_demo").add({
       userId,
       subchapterId,
       quizType,
-      quizSubmission, // array of question objects with user’s answers
+      quizSubmission, // array of question objects
       score,
       totalQuestions,
-      timestamp: new Date()
+      attemptNumber,           // new field
+      timestamp: new Date(),
     });
 
     return res.status(200).json({
@@ -2915,6 +2917,7 @@ app.post("/api/submitQuiz", async (req, res) => {
 });
 
 
+// GET /api/getQuiz
 app.get("/api/getQuiz", async (req, res) => {
   try {
     const { userId, subchapterId, quizType } = req.query;
@@ -2924,30 +2927,119 @@ app.get("/api/getQuiz", async (req, res) => {
 
     const db = admin.firestore();
 
-    // Check quizzes_demo for a doc matching these fields
+    // Fetch ALL attempts for that user/subchapter/quizType
+    // Sort by attemptNumber descending OR timestamp descending
+    // (We'll do attemptNumber for clarity, but you can do timestamp.)
     const snapshot = await db
       .collection("quizzes_demo")
       .where("userId", "==", userId)
       .where("subchapterId", "==", subchapterId)
       .where("quizType", "==", quizType)
-      .limit(1)
+      .orderBy("attemptNumber", "desc")  // or .orderBy("timestamp", "desc")
+      .get();
+
+    // If no docs, return attempts = []
+    if (snapshot.empty) {
+      return res.json({ attempts: [] });
+    }
+
+    // Build an array of attempt docs
+    const attempts = snapshot.docs.map(doc => {
+      const data = doc.data();
+      return {
+        docId: doc.id,
+        userId: data.userId,
+        subchapterId: data.subchapterId,
+        quizType: data.quizType,
+        quizSubmission: data.quizSubmission,
+        score: data.score,
+        totalQuestions: data.totalQuestions,
+        attemptNumber: data.attemptNumber,
+        timestamp: data.timestamp,
+      };
+    });
+
+    return res.json({ attempts });
+  } catch (error) {
+    console.error("Error fetching quiz attempts:", error);
+    return res.status(500).json({ error: "Failed to fetch quiz attempts" });
+  }
+});
+
+
+app.post("/api/submitRevision", async (req, res) => {
+  try {
+    const {
+      userId,
+      subchapterId,
+      revisionType,
+      revisionNumber,
+    } = req.body;
+
+    if (!userId || !subchapterId || !revisionType || !revisionNumber) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const db = admin.firestore();
+
+    // We'll store the record in "revisions_demo"
+    // Use an auto-generated doc ID (or define your own).
+    const docRef = await db.collection("revisions_demo").add({
+      userId,
+      subchapterId,
+      revisionType,   // e.g. "analyze"
+      revisionNumber, // e.g. 1, 2, etc.
+      timestamp: new Date(),
+    });
+
+    return res.status(200).json({
+      message: "Revision record saved successfully",
+      docId: docRef.id
+    });
+  } catch (error) {
+    console.error("Error saving revision record:", error);
+    return res.status(500).json({ error: "Failed to save revision record" });
+  }
+});
+
+
+app.get("/api/getRevisions", async (req, res) => {
+  try {
+    const { userId, subchapterId, revisionType } = req.query;
+    if (!userId || !subchapterId || !revisionType) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const db = admin.firestore();
+
+    // orderBy("revisionNumber", "desc") or by timestamp
+    const snapshot = await db.collection("revisions_demo")
+      .where("userId", "==", userId)
+      .where("subchapterId", "==", subchapterId)
+      .where("revisionType", "==", revisionType)
+      .orderBy("revisionNumber", "desc")
       .get();
 
     if (snapshot.empty) {
-      return res.json({ quizExists: false });
+      return res.json({ revisions: [] });
     }
 
-    // If we found something, return the first doc
-    const quizDoc = snapshot.docs[0].data();
-    // If you want the doc ID, you can do snapshot.docs[0].id
-
-    return res.json({
-      quizExists: true,
-      quizData: quizDoc,
+    const revisions = snapshot.docs.map(doc => {
+      const data = doc.data();
+      return {
+        docId: doc.id,
+        userId: data.userId,
+        subchapterId: data.subchapterId,
+        revisionType: data.revisionType,
+        revisionNumber: data.revisionNumber,
+        timestamp: data.timestamp,
+      };
     });
+
+    return res.json({ revisions });
   } catch (error) {
-    console.error("Error fetching quiz:", error);
-    return res.status(500).json({ error: "Failed to fetch quiz" });
+    console.error("Error fetching revisions:", error);
+    return res.status(500).json({ error: "Failed to fetch revisions" });
   }
 });
 
