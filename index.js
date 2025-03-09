@@ -2874,6 +2874,82 @@ app.post("/api/generate", async (req, res) => {
 
 // Start the server on port 3001 (or your chosen port)
 
+// app.post("/api/submitQuiz", ...)
+app.post("/api/submitQuiz", async (req, res) => {
+  try {
+    const {
+      userId,
+      subchapterId,
+      quizType,
+      quizSubmission, // the questions + user answers
+      score,
+      totalQuestions
+    } = req.body;
+
+    if (!userId || !subchapterId || !quizType || !quizSubmission || !score) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const db = admin.firestore();
+
+    // We'll store the record in "quizzes_demo"
+    // Use an auto-generated doc ID (or you can define a custom ID)
+    const docRef = await db.collection("quizzes_demo").add({
+      userId,
+      subchapterId,
+      quizType,
+      quizSubmission, // array of question objects with user’s answers
+      score,
+      totalQuestions,
+      timestamp: new Date()
+    });
+
+    return res.status(200).json({
+      message: "Quiz submission saved successfully",
+      docId: docRef.id
+    });
+  } catch (error) {
+    console.error("Error saving quiz submission:", error);
+    return res.status(500).json({ error: "Failed to save quiz submission" });
+  }
+});
+
+
+app.get("/api/getQuiz", async (req, res) => {
+  try {
+    const { userId, subchapterId, quizType } = req.query;
+    if (!userId || !subchapterId || !quizType) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const db = admin.firestore();
+
+    // Check quizzes_demo for a doc matching these fields
+    const snapshot = await db
+      .collection("quizzes_demo")
+      .where("userId", "==", userId)
+      .where("subchapterId", "==", subchapterId)
+      .where("quizType", "==", quizType)
+      .limit(1)
+      .get();
+
+    if (snapshot.empty) {
+      return res.json({ quizExists: false });
+    }
+
+    // If we found something, return the first doc
+    const quizDoc = snapshot.docs[0].data();
+    // If you want the doc ID, you can do snapshot.docs[0].id
+
+    return res.json({
+      quizExists: true,
+      quizData: quizDoc,
+    });
+  } catch (error) {
+    console.error("Error fetching quiz:", error);
+    return res.status(500).json({ error: "Failed to fetch quiz" });
+  }
+});
 
 
 const PORT = process.env.PORT || 3001;
