@@ -2925,26 +2925,37 @@ app.get("/api/getQuiz", async (req, res) => {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
+    // Log the incoming query params
+    console.log("GET /api/getQuiz => userId:", userId,
+                "subchapterId:", subchapterId,
+                "quizType:", quizType);
+
     const db = admin.firestore();
 
-    // Fetch ALL attempts for that user/subchapter/quizType
-    // Sort by attemptNumber descending OR timestamp descending
-    // (We'll do attemptNumber for clarity, but you can do timestamp.)
+    // Firestore query
     const snapshot = await db
       .collection("quizzes_demo")
       .where("userId", "==", userId)
       .where("subchapterId", "==", subchapterId)
       .where("quizType", "==", quizType)
-      .orderBy("attemptNumber", "desc")  // or .orderBy("timestamp", "desc")
+      .orderBy("attemptNumber", "desc") // or by timestamp if you prefer
       .get();
 
-    // If no docs, return attempts = []
+    // Log the number of docs returned
+    console.log("GET /api/getQuiz => snapshot size:", snapshot.size);
+
+    // Optional: log each doc
+    snapshot.forEach((doc) => {
+      console.log("Doc ID:", doc.id, "=>", doc.data());
+    });
+
     if (snapshot.empty) {
+      // No docs found
       return res.json({ attempts: [] });
     }
 
     // Build an array of attempt docs
-    const attempts = snapshot.docs.map(doc => {
+    const attempts = snapshot.docs.map((doc) => {
       const data = doc.data();
       return {
         docId: doc.id,
@@ -2959,6 +2970,7 @@ app.get("/api/getQuiz", async (req, res) => {
       };
     });
 
+    // Return to front end
     return res.json({ attempts });
   } catch (error) {
     console.error("Error fetching quiz attempts:", error);
