@@ -2452,13 +2452,19 @@ app.get('/api/process-book-data', async (req, res) => {
 // Example in your Express server file
 
 app.get('/api/latest-book', async (req, res) => {
+  console.log('[DEBUG] (LATEST BOOK) Route called.');
+  console.log('[DEBUG] Query params =>', req.query);
+
   try {
     const userId = req.query.userId || '';
+    console.log(`[DEBUG] userId extracted => "${userId}"`);
+
     if (!userId) {
+      console.log('[DEBUG] No userId provided => returning 400.');
       return res.status(400).json({ error: 'Missing userId' });
     }
 
-    // We assume "books_demo" has a "createdAt" field we can order by
+    console.log('[DEBUG] Querying books_demo collection...');
     const snap = await db
       .collection('books_demo')
       .where('userId', '==', userId)
@@ -2466,20 +2472,26 @@ app.get('/api/latest-book', async (req, res) => {
       .limit(1)
       .get();
 
+    console.log('[DEBUG] Firestore query complete. snap.empty =>', snap.empty);
+
     if (snap.empty) {
+      console.log(`[DEBUG] No books found for userId="${userId}". Returning 404.`);
       return res.status(404).json({ error: 'No books found for this user' });
     }
 
     // The first (and only) doc in the snapshot
     const doc = snap.docs[0];
-    const bookId = doc.id; // the doc ID from Firestore
-    // If you also want to send the doc data, you can
-    // const data = doc.data();
+    const bookId = doc.id;
+    const docData = doc.data();
 
+    console.log('[DEBUG] Found at least one book. bookId =>', bookId);
+    console.log('[DEBUG] Book doc data =>', docData);
+
+    // Return just the bookId or the entire doc if you prefer
     return res.status(200).json({ bookId });
   } catch (error) {
-    console.error('Error fetching latest book:', error);
-    res.status(500).json({ error: error.message });
+    console.error('[ERROR] /api/latest-book =>', error);
+    return res.status(500).json({ error: error.message });
   }
 });
 
