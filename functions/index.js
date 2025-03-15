@@ -18,37 +18,7 @@ const storage = new Storage();
 
 
 
-/**
- * --------------------------------------------------------------------------------------
- * onPDFUpload
- *
- * Trigger Type:
- *   - onObjectFinalized(async (event))
- *     => Fires whenever a new file (object) is finalized in the Cloud Storage bucket.
- *        Specifically, we check if it's a PDF based on "contentType".
- *
- * Brief Summary:
- *   - Downloads the uploaded PDF to a local /tmp directory.
- *   - Parses the PDF text using "pdf-parse" into lines/paragraphs.
- *   - Creates a doc in "pdfExtracts" with metadata about the PDF (filePath, userId, etc.).
- *   - Also creates multiple docs in "pdfPages" (one doc per paragraph) referencing the same pdfDocId.
- *   - Essentially breaks the PDF content into paragraphs and stores them in "pdfPages"
- *     while recording overall info in "pdfExtracts".
- *
- * Where Data Is Written:
- *   1) "pdfPages" collection:
- *      - Multiple documents created, each containing:
- *          pdfDocId (linking back to the pdfExtracts doc)
- *          pageNumber (index or paragraphNumber)
- *          text (the paragraph text)
- *          createdAt (timestamp)
- *
- *   2) "pdfExtracts" collection:
- *      - One document with a new random ID (pdfDocId) storing:
- *          filePath, text, category, courseName, userId, createdAt
- *
- * --------------------------------------------------------------------------------------
- */
+
 
 exports.onPDFUpload = onObjectFinalized(async (event) => {
   // These imports are typically at top-level, but shown here for clarity
@@ -160,28 +130,7 @@ exports.onPDFUpload = onObjectFinalized(async (event) => {
   }
 });
 
-/**
- * --------------------------------------------------------------------------------------
- * countTokens
- *
- * Trigger Type:
- *   - onDocumentCreated("pdfExtracts/{docId}")
- *     => Fires whenever a new document is created in the "pdfExtracts" collection.
- *
- * Brief Summary:
- *   - Reads the "markerText" field from the newly created doc.
- *   - Uses the Tiktoken library to count how many tokens are in that markerText.
- *   - Logs the token count for debugging.
- *   - Updates the same "pdfExtracts/{docId}" doc with:
- *       tokenCount      (numeric number of tokens)
- *       tokenCountedAt  (timestamp indicating when token count was recorded)
- *
- * Where Data Is Written:
- *   - Collection: "pdfExtracts"
- *   - Document:   The same doc that triggered the function (identified by docId)
- *   - Fields Updated: tokenCount, tokenCountedAt
- * --------------------------------------------------------------------------------------
- */
+
 exports.countTokens = onDocumentCreated("pdfExtracts/{docId}", async (event) => {
   try {
     const docSnap = event.data;
@@ -220,31 +169,7 @@ exports.countTokens = onDocumentCreated("pdfExtracts/{docId}", async (event) => 
 });
 
 
-/**
- * --------------------------------------------------------------------------------------
- * addMarkersAndSummarize
- *
- * Trigger Type:
- *   - onDocumentCreated("pdfExtracts/{docId}")
- *     => Fires whenever a new document is created in the "pdfExtracts" collection.
- *
- * Brief Summary:
- *   1) Fetches all related "pdfPages" (by pdfDocId) and concatenates their text with page labels.
- *   2) Updates the "pdfExtracts/{docId}" doc with a "markerText" field (the combined text).
- *   3) Calls GPT to analyze the combined text and produce a JSON structure of top-level chapters.
- *   4) Stores the resulting GPT JSON in "pdfSummaries" (one doc per summary).
- *
- * Where Data Is Written:
- *   - "pdfExtracts/{docId}" (the same doc that triggered the function) is updated:
- *       markerText         (the concatenated page-based text)
- *       markersCreatedAt   (timestamp)
- *
- *   - "pdfSummaries" (new doc):
- *       pdfDocId           (link back to pdfExtracts)
- *       summary            (the JSON from GPT)
- *       createdAt          (timestamp)
- * --------------------------------------------------------------------------------------
- */
+
 
 exports.addMarkersAndSummarize = onDocumentCreated("pdfExtracts/{docId}", async (event) => {
   try {
@@ -358,40 +283,7 @@ ${combinedText}
   }
 });
 
-/**
- * --------------------------------------------------------------------------------------
- * segmentChapters
- *
- * Trigger Type:
- *   - onDocumentCreated("pdfSummaries/{summaryId}")
- *     => Fires whenever a new document is created in the "pdfSummaries" collection.
- *
- * Brief Summary:
- *   1) Reads the GPT-generated JSON summary (from "pdfSummaries/{summaryId}") which
- *      contains an array of chapters with { title, summary, startPage, endPage }.
- *   2) Fetches the matching "pdfExtracts" doc to get courseName, then locates
- *      the corresponding book in "books_demo".
- *   3) For each chapter in the JSON:
- *        - Fetches the relevant pages from "pdfPages" (based on startPage..endPage),
- *          concatenates the text into a "combinedText".
- *        - Creates a "pdfChapters" doc with that combined text (fullText, etc.).
- *        - Also creates a matching "chapters_demo" doc (the user-facing version),
- *          storing bookId, name, etc.
- *        - Cross-references the newly created doc IDs so that pdfChapters references
- *          its corresponding chapters_demo.
- *
- * Where Data Is Written:
- *   - "pdfChapters": multiple new docs, each containing:
- *       pdfDocId, title, summary, startPage, endPage,
- *       fullText (combined page text), fullTextMarkers,
- *       createdAt, and chapterDemoId (added afterward).
- *
- *   - "chapters_demo": multiple new docs, each containing:
- *       bookId, name, createdAt
- *       (the 'id' is then referenced by pdfChapters.chapterDemoId)
- *
- * --------------------------------------------------------------------------------------
- */
+
 
 
 exports.segmentChapters = onDocumentCreated("pdfSummaries/{summaryId}", async (event) => {
@@ -514,30 +406,6 @@ exports.segmentChapters = onDocumentCreated("pdfSummaries/{summaryId}", async (e
   }
 });
 
-/**
- * --------------------------------------------------------------------------------------
- * createBookDoc
- *
- * Trigger Type:
- *   - onDocumentCreated("pdfExtracts/{docId}")
- *     => Fires whenever a new document is created in the "pdfExtracts" collection.
- *
- * Brief Summary:
- *   1) Reads "courseName" and "category" from the newly created pdfExtracts doc.
- *   2) Looks up the matching category doc in "categories_demo" (by name) to find categoryId.
- *   3) Creates a new doc in "books_demo" with that categoryId, the courseName, userId, etc.
- *   4) Updates the original "pdfExtracts/{docId}" doc to record which "books_demo" doc
- *      it corresponds to (bookDemoId).
- *
- * Where Data Is Written:
- *   - "books_demo":
- *       A single new doc is created containing:
- *         categoryId, name (the courseName), userId, createdAt
- *
- *   - "pdfExtracts/{docId}":
- *       Updated to have bookDemoId (the ID of the newly created books_demo doc).
- * --------------------------------------------------------------------------------------
- */
 
 exports.createBookDoc = onDocumentCreated("pdfExtracts/{docId}", async (event) => {
   try {
@@ -594,24 +462,7 @@ exports.createBookDoc = onDocumentCreated("pdfExtracts/{docId}", async (event) =
   }
 });
 
-/**
- * --------------------------------------------------------------------------------------
- * sliceMarkerTextForChapter
- *
- * Trigger Type:
- *   - onDocumentCreated("pdfChapters/{chapterId}")
- *     => Fires whenever a new document is created in the "pdfChapters" collection.
- *
- * Brief Summary:
- *   - Primarily checks if the new doc has a 'fullText' field.
- *   - Logs the length of fullText if present, otherwise logs that there's nothing to slice.
- *   - In this code, no actual slicing or reprocessing is performed; it's effectively a placeholder.
- *
- * Where Data Is Written:
- *   - No additional data is written or updated. The function just reads and logs info
- *     about the newly created pdfChapters doc.
- * --------------------------------------------------------------------------------------
- */
+
 exports.sliceMarkerTextForChapter = onDocumentCreated("pdfChapters/{chapterId}", async (event) => {
   try {
     const chapterSnap = event.data;
@@ -637,29 +488,7 @@ exports.sliceMarkerTextForChapter = onDocumentCreated("pdfChapters/{chapterId}",
   }
 });
 
-/**
- * --------------------------------------------------------------------------------------
- * addMarkersToFullText
- *
- * Trigger Type:
- *   - onDocumentUpdated("pdfChapters/{chapterId}")
- *     => Fires whenever a "pdfChapters" document is updated.
- *
- * Activation Condition:
- *   - Specifically checks if "fullText" changed to a new or different value.
- *
- * Brief Summary:
- *   1) Compares the old "fullText" vs. the updated "fullText".
- *   2) If there's a new or changed "fullText", we insert markers every 500 characters
- *      (like [INDEX=500]) to segment the text.
- *   3) Writes this marker-annotated version into "fullTextMarkers" and sets markersCreatedAt.
- *
- * Where Data Is Written:
- *   - The same "pdfChapters/{chapterId}" doc is updated with:
- *       fullTextMarkers     (the text containing inserted markers)
- *       markersCreatedAt    (timestamp)
- * --------------------------------------------------------------------------------------
- */
+
 exports.addMarkersToFullText = onDocumentUpdated("pdfChapters/{chapterId}", async (event) => {
   try {
     const beforeData = event.data.before?.data() || {};
@@ -713,30 +542,7 @@ exports.addMarkersToFullText = onDocumentUpdated("pdfChapters/{chapterId}", asyn
   }
 });
 
-/**
- * --------------------------------------------------------------------------------------
- * summarizeFullTextMarkers
- *
- * Trigger Type:
- *   - onDocumentCreated("pdfChapters/{chapterId}")
- *     => Fires whenever a new "pdfChapters" doc is created.
- *
- * Activation Condition:
- *   - Checks if "fullTextMarkers" exists in the newly created doc.
- *   - If present, it proceeds to call GPT to further break down the chapter into "subChapters."
- *
- * Brief Summary:
- *   1) Reads "fullTextMarkers" from the new pdfChapters doc.
- *   2) Sends that text to GPT to produce a JSON structure of subChapters (with page markers).
- *   3) Stores the resulting JSON in "pdfSubSummaries" as "subChaptersJson."
- *
- * Where Data Is Written:
- *   - "pdfSubSummaries": a new doc is created containing:
- *       pdfChapterId, subChaptersJson (the JSON from GPT), createdAt
- *
- *   - The original "pdfChapters/{chapterId}" is only read, not updated in this function.
- * --------------------------------------------------------------------------------------
- */
+
 
 exports.summarizeFullTextMarkers = onDocumentCreated("pdfChapters/{chapterId}", async (event) => {
   try {
@@ -818,26 +624,7 @@ ${markers}
   }
 });
 
-/**
- * --------------------------------------------------------------------------------------
- * segmentSubChapters
- *
- * Trigger Type:
- *   - onDocumentCreated("pdfSubSummaries/{subSummaryId}")
- *     => Fires whenever a new document is created in the "pdfSubSummaries" collection.
- *
- * Brief Summary:
- *   1) Reads "subChaptersJson" (GPT-created JSON) from the new doc.
- *   2) Parses it to get an array of subChapters with { title, summary, startMarker, endMarker }.
- *   3) For each subChapter, creates a new doc in "pdfSubChapters", storing:
- *       pdfChapterId, title, summary, startMarker, endMarker, etc.
- *
- * Where Data Is Written:
- *   - "pdfSubChapters": multiple new docs, each containing:
- *       pdfChapterId, title, summary, startMarker, endMarker, createdAt
- *     => These represent the sub-chapters for the given pdfChapterId.
- * --------------------------------------------------------------------------------------
- */
+
 exports.segmentSubChapters = onDocumentCreated("pdfSubSummaries/{subSummaryId}", async (event) => {
   try {
     const docSnap = event.data;
@@ -919,28 +706,7 @@ exports.segmentSubChapters = onDocumentCreated("pdfSubSummaries/{subSummaryId}",
   }
 });
 
-/**
- * --------------------------------------------------------------------------------------
- * sliceMarkerTextForSubchapter
- *
- * Trigger Type:
- *   - onDocumentCreated("pdfSubChapters/{subChapterId}")
- *     => Fires whenever a new doc is created in "pdfSubChapters".
- *
- * Brief Summary:
- *   1) Reads the subchapter's pdfChapterId, startMarker, endMarker.
- *   2) Fetches the parent "pdfChapters" doc to get pdfDocId.
- *   3) Queries "pdfPages" for all pages in [startMarker..endMarker].
- *   4) Concatenates the text of those pages into a single fullText.
- *   5) Updates the same subchapter doc with that combined text (stored in fullText)
- *      and sets textCreatedAt to track when it was done.
- *
- * Where Data Is Written:
- *   - "pdfSubChapters/{subChapterId}": updated with:
- *       fullText, textCreatedAt
- *
- * --------------------------------------------------------------------------------------
- */
+
 exports.sliceMarkerTextForSubchapter = onDocumentCreated(
   "pdfSubChapters/{subChapterId}",
   async (event) => {
@@ -1022,26 +788,7 @@ exports.sliceMarkerTextForSubchapter = onDocumentCreated(
   }
 );
 
-/**
- * --------------------------------------------------------------------------------------
- * createSubChaptersDemoOnCreate
- *
- * Trigger Type:
- *   - onDocumentCreated("pdfSubChapters/{subChapterId}")
- *     => Fires whenever a new document is created in "pdfSubChapters".
- *
- * Brief Summary:
- *   1) Reads the new pdfSubChapters doc (pdfChapterId, title, etc.).
- *   2) Fetches the parent pdfChapters doc to find its chapterDemoId (the user-facing chapter).
- *   3) Creates a corresponding doc in "subchapters_demo" (the final user-facing collection),
- *      using the same subChapterId (optionally). Initializes the summary as empty.
- *
- * Where Data Is Written:
- *   - "subchapters_demo/{subChapterId}" (new doc):
- *       subChapterId, chapterId (chapterDemoId), name (subTitle),
- *       summary (empty initially), createdAt
- * --------------------------------------------------------------------------------------
- */
+
 
 exports.createSubChaptersDemoOnCreate = onDocumentCreated(
   "pdfSubChapters/{subChapterId}",
@@ -1114,30 +861,7 @@ exports.createSubChaptersDemoOnCreate = onDocumentCreated(
   }
 );
 
-/**
- * --------------------------------------------------------------------------------------
- * repurposeSubChapterWithContext
- *
- * Trigger Type:
- *   - onDocumentUpdated("pdfSubChapters/{subChapterId}")
- *     => Fires whenever an existing "pdfSubChapters" document is updated.
- *
- * Activation Condition:
- *   - Specifically checks if "fullText" changed (new or modified text).
- *
- * Brief Summary:
- *   1) Reads the updated fullText for the subchapter and gathers "context" from
- *      the previous/next page in "pdfPages" to avoid abrupt starts/ends.
- *   2) Calls GPT to rewrite the subchapter text in a continuous manner,
- *      preserving style/meaning while ignoring the actual previous/next text content.
- *   3) Writes the final, repurposed text to "fullTextFinal" in the same subchapter doc.
- *
- * Where Data Is Written:
- *   - The same "pdfSubChapters/{subChapterId}" doc is updated:
- *       fullTextFinal        (the GPT-rewritten subchapter)
- *       repurposeContextAt   (timestamp indicating when rewriting completed)
- * --------------------------------------------------------------------------------------
- */
+
 exports.repurposeSubChapterWithContext = onDocumentUpdated("pdfSubChapters/{subChapterId}", async (event) => {
   try {
     const beforeData = event.data.before?.data() || {};
@@ -1295,30 +1019,7 @@ but ensure it feels like a single continuous passage in an educational text.
   }
 });
 
-/**
- * --------------------------------------------------------------------------------------
- * updateSubChaptersDemoOnUpdate
- *
- * Trigger Type:
- *   - onDocumentUpdated("pdfSubChapters/{subChapterId}")
- *     => Fires whenever a doc in "pdfSubChapters" is updated.
- *
- * Activation Condition:
- *   - Specifically checks if "fullTextFinal" changed. If so, we proceed.
- *
- * Brief Summary:
- *   1) Reads the newly updated "fullTextFinal" from pdfSubChapters.
- *   2) Computes the word count of that final text.
- *   3) Updates the corresponding doc in "subchapters_demo" (by the same subChapterId)
- *      with:
- *         summary (the final text)
- *         wordCount
- *
- * Where Data Is Written:
- *   - "subchapters_demo/{subChapterId}" is updated with:
- *       summary, wordCount
- * --------------------------------------------------------------------------------------
- */
+
 
 function getWordCount(text = "") {
   // Trim the text, split by any sequence of whitespace, and filter out empty strings
@@ -1377,42 +1078,6 @@ const db = admin.firestore(); // Assuming you've already initialized admin
 
 
 
-/**
- * --------------------------------------------------------------------------------------
- * getActivitiesForSub
- *
- * Purpose:
- *   - Generates an array of learning "activities" (READ, QUIZ, REVISE) for a subchapter,
- *     based on its proficiency and word count.
- *
- * Parameters:
- *   - sub (object): A subchapter object, expected to have fields:
- *       id            (unique ID)
- *       wordCount     (number of words)
- *       proficiency   (e.g. "unread", "read", or "proficient")
- *   - wpm, quizTime, reviseTime (numeric overrides)
- *
- * Logic:
- *   1) If proficiency is "unread", we add a READ activity with time = wordCount / wpm.
- *   2) If proficiency is "unread" or "read", we add a QUIZ activity (time=quizTime).
- *   3) If proficiency is "unread", "read", or "proficient", we add a REVISE activity (time=reviseTime).
- *
- * Returns:
- *   - An array of objects (activities), each containing:
- *       subChapterId, type (READ/QUIZ/REVISE), and timeNeeded
- *
- * Example:
- *   getActivitiesForSub(
- *     { id: "abc", wordCount: 1000, proficiency: "unread" },
- *     { wpm: 200, quizTime: 5, reviseTime: 5 }
- *   )
- *   => [
- *        { subChapterId: "abc", type: "READ", timeNeeded: 5 },
- *        { subChapterId: "abc", type: "QUIZ", timeNeeded: 5 },
- *        { subChapterId: "abc", type: "REVISE", timeNeeded: 5 }
- *      ]
- * --------------------------------------------------------------------------------------
- */
 
 
 function getActivitiesForSub(sub, { wpm, quizTime, reviseTime }) {
@@ -1452,38 +1117,7 @@ function getActivitiesForSub(sub, { wpm, quizTime, reviseTime }) {
 }
 
 
-/**
- * --------------------------------------------------------------------------------------
- * generateAdaptivePlan (onRequest)
- *
- * Trigger Type:
- *   - onRequest(async (req, res))
- *     => This is an HTTPS callable function, typically accessed via a URL.
- *
- * Brief Summary:
- *   1) Reads user inputs (userId, targetDate, optional overrides like wpm, dailyReadingTime).
- *   2) Fetches the user's "learnerPersona" doc to get defaults (wpm, dailyReadingTime).
- *   3) Retrieves all books from "books_demo" (or a subset if selectedBooks provided).
- *   4) For each book, retrieves chapters ("chapters_demo"), then subchapters ("subchapters_demo").
- *   5) Builds a list of "activities" (READ, QUIZ, REVISE) per subchapter, factoring in
- *      proficiency, wordCount, quizTime, and reviseTime.
- *   6) Distributes these activities into day-based "sessions," ensuring daily time
- *      doesn't exceed the user's reading limit.
- *   7) Writes a final "planDoc" to "adaptive_demo," containing all sessions.
- *
- * Where Data Is Written:
- *   - "adaptive_demo" collection:
- *       A single doc containing:
- *         createdAt, planName, userId, targetDate, sessions[],
- *         maxDayCount, wpmUsed, dailyReadingTimeUsed, level, etc.
- *
- * Return (HTTP Response):
- *   - JSON including:
- *       { message, planId, planDoc }
- *     indicating success and referencing the newly created plan document.
- *
- * --------------------------------------------------------------------------------------
- */
+
 
 exports.generateAdaptivePlan = onRequest(async (req, res) => {
   // ---------------- CORS HEADERS ----------------
@@ -1802,28 +1436,6 @@ exports.generateAdaptivePlan = onRequest(async (req, res) => {
   }
 });
 
-/**
- * --------------------------------------------------------------------------------------
- * generatePlanStats
- *
- * Trigger Type:
- *   - onDocumentCreated({ document: "adaptive_demo/{planId}" })
- *     => Fires whenever a new document is created in the "adaptive_demo" collection.
- *
- * Brief Summary:
- *   1) Reads the newly created plan document (which contains an array of sessions[]).
- *   2) Iterates over each session, summing up times for READ, QUIZ, REVISE, etc.
- *   3) Computes day-by-day stats (readingTime, quizTime, reviseTime, totalTime).
- *   4) Computes overall summaries (totalDays, overallTime, totalReadingTime, etc.).
- *   5) Writes a corresponding stats doc into "adaptive_demo_stats" using the same planId.
- *
- * Where Data Is Written:
- *   - "adaptive_demo_stats/{planId}" (new doc), storing:
- *       planId, createdAt, totalDays, overallTime,
- *       totalReadingTime, totalQuizTime, totalReviseTime, dayStats (array)
- *
- * --------------------------------------------------------------------------------------
- */
 
 exports.generatePlanStats = onDocumentCreated({
   document: "adaptive_demo/{planId}"
@@ -1915,20 +1527,7 @@ exports.generatePlanStats = onDocumentCreated({
 });
 
 
-/**
- * --------------------------------------------------------------------------------------
- * parseLeadingSections
- *
- * Purpose:
- *   - Parses the leading sections of a string (split by ".") and converts each part to an integer,
- *     stopping once a part is not a number.
- *   - Used to identify numeric prefixes like "1.2.3" from a name ("1.2.3 Some Title").
- *
- * Returns:
- *   - An array of numeric values, e.g. [1, 2, 3].
- *   - If no numeric prefix is found, returns [Infinity], which is used in sorting logic.
- * --------------------------------------------------------------------------------------
- */
+
 
 function parseLeadingSections(str) {
   const parts = str.split(".").map((p) => p.trim());
@@ -1946,20 +1545,7 @@ function parseLeadingSections(str) {
 }
 
 
-/**
- * --------------------------------------------------------------------------------------
- * compareSections
- *
- * Purpose:
- *   - Compares two arrays of numeric sections (like [1,2,3] vs. [1,2,5]) to decide which
- *     should come first in sorted order.
- *   - If all compared sections match, returns 0 (tie).
- *   - If one differs, returns the difference (aVal - bVal).
- *
- * Returns:
- *   - A negative, zero, or positive number for sorting logic.
- * --------------------------------------------------------------------------------------
- */
+
 
 function compareSections(aSections, bSections) {
   const len = Math.max(aSections.length, bSections.length);
@@ -1974,20 +1560,6 @@ function compareSections(aSections, bSections) {
 }
 
 
-/**
- * --------------------------------------------------------------------------------------
- * sortByNameWithNumericAware
- *
- * Purpose:
- *   - Sorts an array of items by their "name" field in a way that handles leading numeric
- *     sections properly, so "10.2 Something" doesn't come before "2.1 Something".
- *   - First uses parseLeadingSections + compareSections for numeric prefixes,
- *     then falls back to a normal localeCompare if needed.
- *
- * Returns:
- *   - The same array of items, sorted in place by name with numeric-aware ordering.
- * --------------------------------------------------------------------------------------
- */
 
 function sortByNameWithNumericAware(items) {
   return items.sort((a, b) => {
@@ -2006,25 +1578,7 @@ function sortByNameWithNumericAware(items) {
 }
 
 
-/**
- * --------------------------------------------------------------------------------------
- * getAlwaysAllActivities
- *
- * Purpose:
- *   - Generates an array of [READ, QUIZ, REVISE] activities for a subchapter, ignoring
- *     proficiency. This always adds all three activity types.
- *
- * Parameters:
- *   - subchapter: An object with fields (id, name, wordCount, bookId, chapterId, etc.)
- *   - wpm: Words per minute (numeric).
- *
- * Returns:
- *   - An array of activities, each object containing:
- *       type (READ, QUIZ, REVISE),
- *       timeNeeded (READ = wordCount/wpm, QUIZ=1, REVISE=1),
- *       subChapterId, bookId, chapterId, subChapterName, etc.
- * --------------------------------------------------------------------------------------
- */
+
 
 function getAlwaysAllActivities(subchapter, wpm) {
   const wordCount = subchapter.wordCount || 0;
@@ -2058,20 +1612,7 @@ function getAlwaysAllActivities(subchapter, wpm) {
   ];
 }
 
-/**
- * --------------------------------------------------------------------------------------
- * getDaysBetween
- *
- * Purpose:
- *   - Calculates the number of days between two Date objects, rounding up.
- *   - For example, if startDate=2025-07-01 and endDate=2025-07-04, returns 3 or 4
- *     depending on the inclusive or exclusive logic. In this code, it typically returns 3
- *     if the difference is 3.1 days, we do Math.ceil for partial days.
- *
- * Returns:
- *   - The integer number of days (ceiling).
- * --------------------------------------------------------------------------------------
- */
+
 
 function getDaysBetween(startDate, endDate) {
   const msInDay = 24 * 60 * 60 * 1000;
@@ -2080,42 +1621,6 @@ function getDaysBetween(startDate, endDate) {
 
 
 
-
-/**
- * --------------------------------------------------------------------------------------
- * generateBookPlan (onRequest)
- *
- * Trigger Type:
- *   - onRequest(async (req, res))
- *     => An HTTPS endpoint typically called by a client.
- *
- * Brief Summary:
- *   1) Reads user inputs (userId, targetDate, optional overrides like wpm, dailyReadingTime).
- *   2) Fetches the user's "learnerPersona" doc to get default wpm/dailyReadingTime if overrides
- *      aren’t provided.
- *   3) Retrieves books from "books_demo" (or a subset if selectedBooks is passed).
- *   4) For each book, gathers chapters ("chapters_demo") and subchapters ("subchapters_demo"),
- *      possibly filtered if selectedChapters / selectedSubChapters are given.
- *   5) Builds an array of activities for each subchapter (READ, QUIZ, REVISE), factoring
- *      in the user’s reading speed and quiz/revise times.
- *   6) Unlike the day-based plan, here we create one "session" per book, with all
- *      subchapter activities for that book.
- *   7) Writes the final plan doc to "adaptive_books", storing metadata like planName,
- *      targetDate, sessions[] (one session per book), etc.
- *
- * Where Data Is Written:
- *   - "adaptive_books" collection:
- *       A new doc with fields like:
- *         createdAt, planName, userId, targetDate, sessions[], maxDayCount,
- *         wpmUsed, dailyReadingTimeUsed, level, etc.
- *
- * Return (HTTP Response):
- *   - JSON containing:
- *       { message, planId, planDoc }
- *     indicating success and referencing the newly created doc in "adaptive_books".
- *
- * --------------------------------------------------------------------------------------
- */
 
 
 exports.generateBookPlan = onRequest(async (req, res) => {
@@ -2392,18 +1897,6 @@ exports.generateBookPlan = onRequest(async (req, res) => {
 
 
 
-/**
- * getActivitiesForSub2
- * --------------------
- * Builds an array of tasks (READ, QUIZ, REVISE) for sub-chapter
- * from userCurrentStage up to finalStage. 
- *
- * - If user is behind "remember", add a READ activity (time depends on sub-chapter word count or a default).
- * - Then for each stage in [remember..finalStage], add QUIZ + REVISE with time=5 each, 
- *   but only if we haven't passed that stage.
- */
-
-
 
 // Example placeholders (replace with real code as needed):
 function getDaysBetween(d1, d2) {
@@ -2477,12 +1970,7 @@ function numberToStage(n) {
   }
 }
 
-/**
- * getActivitiesForSub2 (No REVISE tasks)
- * --------------------------------------
- *  - If user is behind "remember," add READ.
- *  - Then for each stage from current+1..final, add QUIZ only (no revise).
- */
+
 function getActivitiesForSub2(sub, {
   userCurrentStage,   // e.g. "none"|"remember"|"understand"|"apply"|"analyze"
   startStage,
