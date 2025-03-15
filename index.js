@@ -3068,6 +3068,45 @@ app.get("/api/getRevisions", async (req, res) => {
 });
 
 
+////////////////////////////////////////////////////////////////////////
+// GET /api/exam-config
+//  Returns an exam config document for a given examId
+//  If examId is empty or "general," we fallback to "general" doc
+////////////////////////////////////////////////////////////////////////
+app.get("/api/exam-config", async (req, res) => {
+  try {
+    const { examId } = req.query;
+    // Default examId to "general" if empty
+    const effectiveExamId = examId && examId.trim() ? examId : "general";
+
+    const db = admin.firestore();
+    const docRef = db.collection("examConfigs").doc(effectiveExamId);
+    const snap = await docRef.get();
+
+    if (!snap.exists) {
+      return res.status(404).json({
+        error: `No exam config found for examId='${effectiveExamId}'.`
+      });
+    }
+
+    const data = snap.data() || {};
+    // data might have { stages: [...], planTypes: {...}, ... }
+
+    // Return just what's needed on the front end.
+    // Usually, the front end only needs "stages", but you can return the entire doc if you prefer.
+    return res.json({
+      examId: effectiveExamId,
+      stages: data.stages || [],
+      planTypes: data.planTypes || {}
+      // add other fields if needed
+    });
+  } catch (error) {
+    console.error("Error in /api/exam-config:", error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
