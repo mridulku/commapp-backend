@@ -1,90 +1,108 @@
 /**
- * createSampleData.js
+ * createExamConfig.js
  *
- * Usage: node createSampleData.js
+ * Usage: node createExamConfig.js
  *
  * This script initializes a connection to Firestore via the Admin SDK
- * and writes sample documents into a collection named "booksCollection".
+ * using the environment variable FIREBASE_SERVICE_ACCOUNT (which must
+ * contain the entire JSON for your service account key), and writes
+ * a doc "general" under the "examConfigs" collection.
  */
 
 // 1. Import the Firebase Admin SDK
 const admin = require("firebase-admin");
 
-// 2. Load your service account JSON
-//    Replace './serviceAccountKey.json' with the correct path to your key file
+// 2. Load your service account JSON from environment variable
 const firebaseServiceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT;
+if (!firebaseServiceAccountJson) {
+  console.error("❌ FIREBASE_SERVICE_ACCOUNT env var is not set.");
+  process.exit(1);
+}
 
-// 2. Parse it into an object
-const serviceAccount = JSON.parse(firebaseServiceAccountJson);
+// 3. Parse it into an object
+let serviceAccount;
+try {
+  serviceAccount = JSON.parse(firebaseServiceAccountJson);
+} catch (error) {
+  console.error("❌ FIREBASE_SERVICE_ACCOUNT could not be parsed as valid JSON:", error);
+  process.exit(1);
+}
 
-// 3. Initialize the Firebase app (if not already initialized)
+// 4. Initialize the Firebase app (if not already initialized)
 if (!admin.apps.length) {
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
   });
 }
 
-// 4. Get a reference to Firestore
+// 5. Get a reference to Firestore
 const db = admin.firestore();
 
-// 5. Create an array of sample data
-// Each object in this array will become one document in "booksCollection"
-const sampleData = [
-  {
-    book: "Book A",
-    chapter: "Chapter 1",
-    subChapter: "Section 1.1",
-    summary: "This is the summary for Book A, Chapter 1, Section 1.1",
-  },
-  {
-    book: "Book A",
-    chapter: "Chapter 1",
-    subChapter: "Section 1.2",
-    summary: "This is the summary for Book A, Chapter 1, Section 1.2",
-  },
-  {
-    book: "Book A",
-    chapter: "Chapter 2",
-    subChapter: "Section 2.1",
-    summary: "This is the summary for Book A, Chapter 2, Section 2.1",
-  },
-  {
-    book: "Book B",
-    chapter: "Introduction",
-    subChapter: "Preface",
-    summary: "Preface text for Book B.",
-  },
-  {
-    book: "Book B",
-    chapter: "Introduction",
-    subChapter: "Overview",
-    summary: "Overview text for Book B's introduction.",
-  },
-  {
-    book: "Book B",
-    chapter: "Chapter X",
-    subChapter: "Topic X.1",
-    summary: "Details for Book B, Chapter X, Topic X.1",
-  },
-];
+// 6. The data we want to store for our "general" exam config
+const examConfigData = {
+  // Stages used in the "general" framework
+  stages: ["none", "remember", "understand", "apply", "analyze"],
 
-// 6. A simple async function to add these documents
-async function addSampleData() {
+  // PlanTypes mapping planType => { startStage, finalStage }
+  planTypes: {
+    "none-basic": {
+      startStage: "remember",
+      finalStage: "understand",
+    },
+    "none-moderate": {
+      startStage: "remember",
+      finalStage: "apply",
+    },
+    "none-advanced": {
+      startStage: "remember",
+      finalStage: "analyze",
+    },
+    "some-basic": {
+      startStage: "understand",
+      finalStage: "understand",
+    },
+    "some-moderate": {
+      startStage: "understand",
+      finalStage: "apply",
+    },
+    "some-advanced": {
+      startStage: "understand",
+      finalStage: "analyze",
+    },
+    "strong-basic": {
+      startStage: "apply",
+      finalStage: "apply",
+    },
+    "strong-moderate": {
+      startStage: "apply",
+      finalStage: "apply",
+    },
+    "strong-advanced": {
+      startStage: "apply",
+      finalStage: "analyze",
+    },
+  },
+
+  // (Optional) Add more fields if you want, e.g. defaultWpm, defaultQuizTime, etc.
+  // defaultWpm: 200,
+  // defaultQuizTime: 5
+};
+
+// 7. A simple async function to add/update this document
+async function createExamConfig() {
   try {
-    console.log("Adding sample documents to 'booksCollection'...");
+    console.log("Creating or updating examConfigs/general...");
 
-    // For each item in sampleData, add a doc
-    for (const doc of sampleData) {
-      await db.collection("booksCollection").add(doc);
-    }
+    // Write (or update) the doc
+    await db.collection("examConfigs").doc("general").set(examConfigData);
 
-    console.log("✅ Successfully added sample data to Firestore!");
+    console.log("✅ Successfully created/updated examConfigs/general!");
     process.exit(0); // Exit the script successfully
   } catch (error) {
-    console.error("❌ Error adding sample data:", error);
+    console.error("❌ Error creating exam config:", error);
     process.exit(1); // Exit with an error code
   }
 }
 
-// 7. Run the function
-addSampleData();
+// 8. Run the function
+createExamConfig();

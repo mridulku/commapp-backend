@@ -2014,7 +2014,7 @@ function getActivitiesForSub2(sub, {
   return tasks;
 }
 
-
+/*
 // The main plan generation function
 exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
   res.set("Access-Control-Allow-Origin", "*");
@@ -2308,5 +2308,441 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     return res.status(500).json({ error: error.message });
   }
 });
+*/
 
+
+exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Headers", "Content-Type,Authorization");
+  res.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).send("");
+  }
+
+  // ------------------------
+  // A) Basic Input
+  // ------------------------
+  try {
+    const userId = req.query.userId || req.body.userId;
+    if (!userId) {
+      return res.status(400).json({ error: "Missing userId." });
+    }
+
+    const targetDateStr = req.query.targetDate || req.body.targetDate;
+    if (!targetDateStr) {
+      return res.status(400).json({ error: "Missing targetDate." });
+    }
+    const targetDate = new Date(targetDateStr);
+    if (isNaN(targetDate.getTime())) {
+      return res.status(400).json({ error: "Invalid targetDate format." });
+    }
+
+    // Exam ID (defaults to "general" if empty)
+    const examId = req.query.examId || req.body.examId || "general";
+
+    const today = new Date();
+    let defaultMaxDayCount = getDaysBetween(today, targetDate);
+    if (defaultMaxDayCount < 0) defaultMaxDayCount = 0;
+
+    // ------------------------
+    // B) Optional overrides
+    // ------------------------
+    const maxDaysOverride =
+      req.body.maxDays !== undefined ? Number(req.body.maxDays) : null;
+    const wpmOverride =
+      req.body.wpm !== undefined ? Number(req.body.wpm) : null;
+    const dailyReadingTimeOverride =
+      req.body.dailyReadingTime !== undefined
+        ? Number(req.body.dailyReadingTime)
+        : null;
+
+    // We fix quizTime=5 by default (no revise)
+    const quizTimeOverride =
+      req.body.quizTime !== undefined ? Number(req.body.quizTime) : 5;
+
+    // planType => e.g. "none-basic", "some-advanced", etc.
+    const level = req.body.planType || "none-basic";
+
+    const selectedBooks = Array.isArray(req.body.selectedBooks)
+      ? req.body.selectedBooks
+      : null;
+    const selectedChapters = Array.isArray(req.body.selectedChapters)
+      ? req.body.selectedChapters
+      : null;
+    const selectedSubChapters = Array.isArray(req.body.selectedSubChapters)
+      ? req.body.selectedSubChapters
+      : null;
+    const singleBookIdFromBody = req.body.bookId || "";
+
+    // ------------------------
+    // C) Fetch Persona
+    // ------------------------
+    const db = admin.firestore();
+    const personaSnap = await db
+      .collection("learnerPersonas")
+      .where("userId", "==", userId)
+      .limit(1)
+      .get();
+    if (personaSnap.empty) {
+      return res
+        .status(404)
+        .json({ error: `No learner persona found for userId: ${userId}` });
+    }
+    const personaData = personaSnap.docs[0].data() || {};
+    if (!personaData.wpm || !personaData.dailyReadingTime) {
+      return res
+        .status(400)
+        .json({ error: "Persona doc must have 'wpm' and 'dailyReadingTime'." });
+    }
+
+    const finalWpm = wpmOverride || personaData.wpm;
+    const finalDailyReadingTime =
+      dailyReadingTimeOverride || personaData.dailyReadingTime;
+    let maxDayCount =
+      maxDaysOverride !== null ? maxDaysOverride : defaultMaxDayCount;
+
+    // ------------------------
+    // D) Fetch exam config
+    // ------------------------
+    // If examId is "general" or empty => we'll try examConfigs/general
+    const examDocRef = db.collection("examConfigs").doc(examId);
+    const examDocSnap = await examDocRef.get();
+
+    if (!examDocSnap.exists) {
+      // If they asked for something other than "general" but it doesn't exist, error
+      if (examId !== "general") {
+        return res
+          .status(400)
+          .json({ error: `No exam config found for examId='${examId}'.` });
+      } else {
+        return res
+          .status(400)
+          .json({ error: "No 'general' exam config found in examConfigs." });
+      }
+    }
+
+    const examConfig = examDocSnap.data() || {};
+    if (!examConfig.stages || !examConfig.planTypes) {
+      return res
+        .status(400)
+        .json({ error: `Exam config doc for '${examId}' is missing 'stages' or 'planTypes'.` });
+    }
+
+    // Helper to convert stage string -> numeric index
+    function stageToNumber(stageStr) {
+      const idx = examConfig.stages.indexOf(stageStr);
+      return idx >= 0 ? idx : 0; // if not found, default 0
+    }
+
+    // Helper to convert numeric index -> stage string
+    function numberToStage(idx) {
+      if (idx < 0) return examConfig.stages[0];
+      if (idx >= examConfig.stages.length) {
+        return examConfig.stages[examConfig.stages.length - 1];
+      }
+      return examConfig.stages[idx];
+    }
+
+    // This replaces the old mapPlanTypeToStages() function
+    function getPlanTypeStages(planType) {
+      const mapping = examConfig.planTypes[planType];
+      if (!mapping) {
+        // fallback: from the first stage to the last stage in the array
+        return {
+          startStage: examConfig.stages[0],
+          finalStage: examConfig.stages[examConfig.stages.length - 1],
+        };
+      }
+      return mapping;
+    }
+
+    // This replaces the old getActivitiesForSub2() function
+    function getActivitiesForSub2(sub, {
+      userCurrentStage, // e.g. "none"|"remember"|"understand"|"apply"|"analyze"
+      startStage,
+      finalStage,
+      wpm,
+      quizTime = 5
+    }) {
+      const stageIndex = stageToNumber(userCurrentStage);
+      const startIndex = stageToNumber(startStage);
+      const finalIndex = stageToNumber(finalStage);
+
+      // If user is beyond final => no tasks
+      if (stageIndex >= finalIndex) {
+        return [];
+      }
+
+      const tasks = [];
+
+      // A) If user is behind "remember", add READ
+      // i.e. if examConfig includes a "remember" stage
+      const rememberIndex = examConfig.stages.indexOf("remember");
+      if (rememberIndex !== -1) {
+        // If user is behind the "remember" stage, and the plan includes it
+        if (stageIndex < rememberIndex && startIndex <= rememberIndex) {
+          // reading time logic
+          const readTime = sub.wordCount
+            ? Math.ceil(sub.wordCount / wpm)
+            : 5;
+          tasks.push({
+            type: "READ",
+            timeNeeded: readTime
+          });
+        }
+      }
+
+      // B) For each stage from max(stageIndex+1, startIndex) up to finalIndex => QUIZ only
+      let currentNeededStart = Math.max(stageIndex + 1, startIndex);
+      for (let st = currentNeededStart; st <= finalIndex; st++) {
+        tasks.push({
+          type: "QUIZ",
+          quizStage: numberToStage(st),
+          timeNeeded: quizTime
+        });
+      }
+
+      return tasks;
+    }
+
+    // ------------------------
+    // E) Fetch Books
+    // ------------------------
+    let arrayOfBookIds = [];
+    if (selectedBooks && selectedBooks.length > 0) {
+      arrayOfBookIds = selectedBooks;
+    } else if (singleBookIdFromBody) {
+      arrayOfBookIds = [singleBookIdFromBody];
+    }
+
+    let booksSnap;
+    if (arrayOfBookIds.length > 0) {
+      booksSnap = await db
+        .collection("books_demo")
+        .where(admin.firestore.FieldPath.documentId(), "in", arrayOfBookIds)
+        .get();
+    } else {
+      booksSnap = await db.collection("books_demo").get();
+    }
+
+    const booksData = [];
+    for (const bookDoc of booksSnap.docs) {
+      const bookId = bookDoc.id;
+      const book = { id: bookId, ...bookDoc.data() };
+
+      // F) fetch chapters
+      let chaptersSnap;
+      if (selectedChapters && selectedChapters.length > 0) {
+        chaptersSnap = await db
+          .collection("chapters_demo")
+          .where("bookId", "==", bookId)
+          .where(
+            admin.firestore.FieldPath.documentId(),
+            "in",
+            selectedChapters
+          )
+          .get();
+      } else {
+        chaptersSnap = await db
+          .collection("chapters_demo")
+          .where("bookId", "==", bookId)
+          .get();
+      }
+
+      const chaptersData = [];
+      for (const chapterDoc of chaptersSnap.docs) {
+        const chapterId = chapterDoc.id;
+        const chapter = { id: chapterId, ...chapterDoc.data() };
+
+        // G) fetch subchapters
+        let subSnap;
+        if (selectedSubChapters && selectedSubChapters.length > 0) {
+          subSnap = await db
+            .collection("subchapters_demo")
+            .where("chapterId", "==", chapterId)
+            .where(
+              admin.firestore.FieldPath.documentId(),
+              "in",
+              selectedSubChapters
+            )
+            .get();
+        } else {
+          subSnap = await db
+            .collection("subchapters_demo")
+            .where("chapterId", "==", chapterId)
+            .get();
+        }
+
+        const subData = subSnap.docs.map((d) => ({
+          id: d.id,
+          ...d.data(),
+        }));
+
+        // sort subchapters
+        chapter.subchapters = sortByNameWithNumericAware(subData);
+        chaptersData.push(chapter);
+      }
+      book.chapters = sortByNameWithNumericAware(chaptersData);
+      booksData.push(book);
+    }
+
+    // ------------------------
+    // H) Build array of tasks
+    // ------------------------
+    const { startStage, finalStage } = getPlanTypeStages(level);
+    const allActivities = [];
+
+    for (const book of booksData) {
+      if (!book.chapters) continue;
+      for (const chapter of book.chapters) {
+        if (!chapter.subchapters) continue;
+        for (const sub of chapter.subchapters) {
+          const userCurrentStage = sub.currentStage || "none";
+
+          // We only do reading + quiz (no revise) => use getActivitiesForSub2
+          const subActs = getActivitiesForSub2(sub, {
+            userCurrentStage,
+            startStage,
+            finalStage,
+            wpm: finalWpm,
+            quizTime: quizTimeOverride
+          });
+
+          for (const act of subActs) {
+            allActivities.push({
+              ...act,
+              level,
+              bookId: book.id,
+              bookName: book.name || "",
+              chapterId: chapter.id,
+              chapterName: chapter.name || "",
+              subChapterId: sub.id,
+              subChapterName: sub.name || ""
+            });
+          }
+        }
+      }
+    }
+
+    // ------------------------
+    // I) Distribute into sessions
+    // ------------------------
+    const dailyTimeMins = finalDailyReadingTime;
+    let dayIndex = 1;
+    const sessions = [];
+
+    let pendingTasks = [...allActivities];
+
+    function buildNextDay() {
+      return {
+        sessionLabel: dayIndex.toString(),
+        activities: [],
+        timeUsed: 0,
+        usedSubs: new Set(),
+      };
+    }
+    let currentDay = buildNextDay();
+
+    function finalizeDay() {
+      if (currentDay.activities.length > 0) {
+        sessions.push({
+          sessionLabel: currentDay.sessionLabel,
+          activities: currentDay.activities,
+        });
+        dayIndex++;
+      }
+      currentDay = buildNextDay();
+    }
+
+    while (pendingTasks.length > 0 && dayIndex <= maxDayCount) {
+      let placed = false;
+
+      // Try new sub-chapter first
+      for (let i = 0; i < pendingTasks.length; i++) {
+        const t = pendingTasks[i];
+        const actTime = t.timeNeeded || 1;
+        const leftover = dailyTimeMins - currentDay.timeUsed;
+        if (
+          actTime <= leftover &&
+          !currentDay.usedSubs.has(t.subChapterId)
+        ) {
+          // place
+          currentDay.activities.push(t);
+          currentDay.timeUsed += actTime;
+          currentDay.usedSubs.add(t.subChapterId);
+          pendingTasks.splice(i, 1);
+          placed = true;
+          break;
+        }
+      }
+
+      if (!placed) {
+        // fallback => see if we can place same sub-chapter again to fill leftover
+        let placedSame = false;
+        for (let i = 0; i < pendingTasks.length; i++) {
+          const t = pendingTasks[i];
+          const actTime = t.timeNeeded || 1;
+          const leftover = dailyTimeMins - currentDay.timeUsed;
+          if (actTime <= leftover) {
+            currentDay.activities.push(t);
+            currentDay.timeUsed += actTime;
+            currentDay.usedSubs.add(t.subChapterId);
+            pendingTasks.splice(i, 1);
+            placedSame = true;
+            break;
+          }
+        }
+        if (!placedSame) {
+          // no tasks fit leftover => finalize day
+          finalizeDay();
+        }
+      }
+
+      if (currentDay.timeUsed >= dailyTimeMins) {
+        finalizeDay();
+      }
+    }
+
+    // finalize last day
+    if (currentDay.activities.length > 0 && dayIndex <= maxDayCount) {
+      finalizeDay();
+    }
+
+    // ------------------------
+    // J) Write planDoc
+    // ------------------------
+    let singleBookId = "";
+    if (singleBookIdFromBody) {
+      singleBookId = singleBookIdFromBody;
+    } else if (selectedBooks && selectedBooks.length > 0) {
+      singleBookId = selectedBooks[0];
+    }
+
+    const planDoc = {
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      planName: `Adaptive Plan (v2) for User ${userId}`,
+      userId,
+      targetDate: targetDateStr,
+      sessions,
+      maxDayCount,
+      wpmUsed: finalWpm,
+      dailyReadingTimeUsed: finalDailyReadingTime,
+      level,
+      bookId: singleBookId,
+      examId, // <-- store the exam type as well
+    };
+
+    const newRef = await db.collection("adaptive_demo").add(planDoc);
+
+    return res.status(200).json({
+      message: "Successfully generated plan in 'adaptive_demo'.",
+      planId: newRef.id,
+      planDoc,
+    });
+  } catch (error) {
+    console.error("Error generating adaptive plan v2:", error);
+    return res.status(500).json({ error: error.message });
+  }
+});
 
