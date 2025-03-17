@@ -2799,7 +2799,7 @@ For example:
 
   return parsed;
 }
-
+/*
 
 app.post("/api/generate", async (req, res) => {
   try {
@@ -3067,6 +3067,7 @@ app.get("/api/getRevisions", async (req, res) => {
   }
 });
 
+*/
 
 ////////////////////////////////////////////////////////////////////////
 // GET /api/exam-config
@@ -3106,6 +3107,279 @@ app.get("/api/exam-config", async (req, res) => {
   }
 });
 
+
+
+
+/**
+ * /api/generate
+ * 
+ * 1) Fetches a "prompt" doc from Firestore (by promptKey).
+ * 2) Fetches user "activities" + subchapter summary.
+ * 3) Combines them into a 'finalPrompt'.
+ * 4) Calls OpenAI with the new "chat.completions.create" method (v4.x).
+ * 5) Returns GPT's JSON result (plus UIconfig).
+ */
+
+app.post("/api/generate", async (req, res) => {
+  try {
+    const { userId, subchapterId, promptKey } = req.body;
+    if (!userId || !subchapterId || !promptKey) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    // Firestore ref
+    const db = admin.firestore();
+
+    // 1) Fetch the prompt doc
+    const promptSnapshot = await db
+      .collection("prompts")
+      .where("promptKey", "==", promptKey)
+      .limit(1)
+      .get();
+
+    let promptText = "";
+    let UIconfig = {};
+
+    if (!promptSnapshot.empty) {
+      const promptDoc = promptSnapshot.docs[0];
+      const promptData = promptDoc.data();
+      promptText = promptData.promptText || "";
+      UIconfig = promptData.UIconfig || {};
+    } else {
+      console.warn(`No prompt document found for promptKey: ${promptKey}`);
+      // We can proceed, but GPT won't have any instructions
+    }
+
+    // 2) Fetch user activities
+    const activitiesSnapshot = await db
+      .collection("user_activities_demo")
+      .where("userId", "==", userId)
+      .where("subChapterId", "==", subchapterId)  // or subchapterId if your DB uses that
+      .orderBy("timestamp", "desc")
+      .get();
+
+    let activitiesText = "";
+    activitiesSnapshot.forEach((doc) => {
+      const data = doc.data();
+      const activityText = data.content || data.eventType || "";
+      if (activityText) {
+        activitiesText += activityText + "\n";
+      }
+    });
+
+    // 3) Fetch subchapter summary
+    const subChapterDoc = await db
+      .collection("subchapters_demo")
+      .doc(subchapterId)
+      .get();
+
+    let subChapterSummary = "";
+    if (subChapterDoc.exists) {
+      const subChData = subChapterDoc.data();
+      subChapterSummary = subChData.summary || "";
+    } else {
+      console.warn(`No subchapter document found for subchapterId: ${subchapterId}`);
+    }
+
+    // 4) Build final prompt
+    const finalPrompt = `
+Subchapter Summary:
+${subChapterSummary}
+
+User Activities:
+${activitiesText}
+
+Instructions:
+${promptText}
+`.trim();
+
+    console.log("Calling GPT with finalPrompt:", finalPrompt);
+
+    // 5) Call the new OpenAI Chat endpoint (v4.x style)
+    //    Make sure you have: npm install openai@latest 
+    //    and have done:
+    //      const { Configuration, OpenAIApi } = require("openai");
+    //      const configuration = new Configuration({ apiKey: ... });
+    //      const openai = new OpenAIApi(configuration);
+    const openaiResponse = await openai.chat.completions.create({
+      model: "gpt-3.5-turbo",   // or "gpt-4"
+      messages: [{ role: "user", content: finalPrompt }],
+      max_tokens: 1000,
+      temperature: 0.7,
+    });
+    console.log("Raw openaiResponse:", openaiResponse);
+
+    // Extract GPT's text
+    const result = openaiResponse.choices[0].message.content.trim();
+    console.log("OpenAI result:", result);
+
+    // 6) Return finalPrompt, GPT result, UI config
+    return res.json({
+      finalPrompt,
+      result,
+      UIconfig,
+    });
+
+  } catch (error) {
+    console.error("Error in /api/generate:", error);
+    return res.status(500).json({ error: "Failed to generate quiz" });
+  }
+});
+
+// -------------- /api/submitQuiz --------------
+app.post("/api/submitQuiz", async (req, res) => {
+  try {
+    const {
+      userId,
+      subchapterId,
+      quizType,
+      quizSubmission,
+      score,
+      totalQuestions,
+      attemptNumber
+    } = req.body;
+
+    if (!userId || !subchapterId || !quizType || !quizSubmission || !score) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const db = admin.firestore();
+    const docRef = await db.collection("quizzes_demo").add({
+      userId,
+      subchapterId,
+      quizType,
+      quizSubmission,
+      score,
+      totalQuestions,
+      attemptNumber,
+      timestamp: new Date(),
+    });
+
+    return res.status(200).json({
+      message: "Quiz submission saved successfully",
+      docId: docRef.id
+    });
+  } catch (error) {
+    console.error("Error in /api/submitQuiz:", error);
+    return res.status(500).json({ error: "Failed to save quiz submission" });
+  }
+});
+
+// -------------- /api/getQuiz --------------
+app.get("/api/getQuiz", async (req, res) => {
+  try {
+    const { userId, subchapterId, quizType } = req.query;
+    if (!userId || !subchapterId || !quizType) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const db = admin.firestore();
+    const snapshot = await db
+      .collection("quizzes_demo")
+      .where("userId", "==", userId)
+      .where("subchapterId", "==", subchapterId)
+      .where("quizType", "==", quizType)
+      .orderBy("attemptNumber", "desc")
+      .get();
+
+    if (snapshot.empty) {
+      return res.json({ attempts: [] });
+    }
+
+    const attempts = snapshot.docs.map((doc) => {
+      const data = doc.data();
+      return {
+        docId: doc.id,
+        userId: data.userId,
+        subchapterId: data.subchapterId,
+        quizType: data.quizType,
+        quizSubmission: data.quizSubmission,
+        score: data.score,
+        totalQuestions: data.totalQuestions,
+        attemptNumber: data.attemptNumber,
+        timestamp: data.timestamp,
+      };
+    });
+
+    return res.json({ attempts });
+  } catch (error) {
+    console.error("Error in /api/getQuiz:", error);
+    return res.status(500).json({ error: "Failed to fetch quiz attempts" });
+  }
+});
+
+// -------------- /api/submitRevision --------------
+app.post("/api/submitRevision", async (req, res) => {
+  try {
+    const {
+      userId,
+      subchapterId,
+      revisionType,
+      revisionNumber
+    } = req.body;
+
+    if (!userId || !subchapterId || !revisionType || !revisionNumber) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const db = admin.firestore();
+    const docRef = await db.collection("revisions_demo").add({
+      userId,
+      subchapterId,
+      revisionType,
+      revisionNumber,
+      timestamp: new Date(),
+    });
+
+    return res.status(200).json({
+      message: "Revision record saved successfully",
+      docId: docRef.id
+    });
+  } catch (error) {
+    console.error("Error in /api/submitRevision:", error);
+    return res.status(500).json({ error: "Failed to save revision record" });
+  }
+});
+
+// -------------- /api/getRevisions --------------
+app.get("/api/getRevisions", async (req, res) => {
+  try {
+    const { userId, subchapterId, revisionType } = req.query;
+    if (!userId || !subchapterId || !revisionType) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const db = admin.firestore();
+    const snapshot = await db
+      .collection("revisions_demo")
+      .where("userId", "==", userId)
+      .where("subchapterId", "==", subchapterId)
+      .where("revisionType", "==", revisionType)
+      .orderBy("revisionNumber", "desc")
+      .get();
+
+    if (snapshot.empty) {
+      return res.json({ revisions: [] });
+    }
+
+    const revisions = snapshot.docs.map((doc) => {
+      const data = doc.data();
+      return {
+        docId: doc.id,
+        userId: data.userId,
+        subchapterId: data.subchapterId,
+        revisionType: data.revisionType,
+        revisionNumber: data.revisionNumber,
+        timestamp: data.timestamp,
+      };
+    });
+
+    return res.json({ revisions });
+  } catch (error) {
+    console.error("Error in /api/getRevisions:", error);
+    return res.status(500).json({ error: "Failed to fetch revisions" });
+  }
+});
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
