@@ -1074,6 +1074,131 @@ exports.updateSubChaptersDemoOnUpdate = onDocumentUpdated(
 
 
 
+exports.extractConceptsOnFlag = onDocumentUpdated("subchapters_demo/{docId}", async (event) => {
+  const beforeData = event.data.before?.data() || {};
+  const afterData = event.data.after?.data() || {};
+  const docId = event.params.docId;
+
+  // oldVal => conceptExtractionRequested in "before"
+  const oldVal = beforeData.conceptExtractionRequested;
+  // newVal => conceptExtractionRequested in "after"
+  const newVal = afterData.conceptExtractionRequested;
+
+  // If it was not true before and now it's true => run GPT
+  if (!oldVal && newVal) {
+    console.log(`extractConceptsOnFlag triggered for subchapters_demo/${docId}`);
+
+    // 1) Grab summary from the after data
+    const summaryText = afterData.summary || "";
+    if (!summaryText) {
+      console.log("No summary text found. Skipping GPT concept extraction.");
+      return;
+    }
+
+    try {
+      // 2) Set up GPT
+      const openAiKey = process.env.OPENAI_API_KEY;
+      if (!openAiKey) {
+        throw new Error("OPENAI_API_KEY is not set in environment variables!");
+      }
+      const configuration = new Configuration({ apiKey: openAiKey });
+      const openai = new OpenAIApi(configuration);
+
+      // 3) Build concept-extraction prompt
+      const prompt = `
+You are an educational content analyst. 
+You have the following text from a subchapter:
+
+"""${summaryText}"""
+
+Please do the following:
+1. List the major concepts or skills covered in this text. 
+   - Provide a short name/title for each concept.
+   - Provide a brief 1–2 sentence explanation of its meaning or importance.
+2. For each concept, list any sub-points or examples crucial to understanding it.
+3. Return your answer in a structured JSON format like:
+
+{
+  "concepts": [
+    {
+      "name": "...",
+      "summary": "...",
+      "subPoints": ["...", "..."]
+    },
+    ...
+  ]
+}
+
+Do not include extra commentary outside the JSON.
+`.trim();
+
+      // 4) Call GPT
+      const completion = await openai.createChatCompletion({
+        model: "gpt-3.5-turbo", // or a model you prefer
+        messages: [
+          { role: "system", content: "You are a helpful educational assistant." },
+          { role: "user", content: prompt },
+        ],
+        temperature: 0.7,
+      });
+
+      const gptOutput = completion.data.choices[0].message.content.trim();
+      console.log("GPT concept extraction output:", gptOutput);
+
+      // 5) Parse the JSON
+      let parsed;
+      try {
+        parsed = JSON.parse(gptOutput);
+      } catch (parseErr) {
+        console.error("Error parsing GPT JSON for concepts:", parseErr);
+        // optionally store an error field or revert the flag
+        await event.data.after.ref.update({
+          conceptExtractionRequested: false,
+          conceptExtractionError: "Invalid JSON from GPT"
+        });
+        return;
+      }
+
+      const concepts = parsed.concepts || [];
+      console.log(`Extracted ${concepts.length} concepts.`);
+
+      // 6) Store the concepts
+      const db = admin.firestore();
+      for (const concept of concepts) {
+        await db.collection("subchapterConcepts").add({
+          subChapterId: docId,
+          name: concept.name || "Untitled",
+          summary: concept.summary || "",
+          subPoints: concept.subPoints || [],
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+
+      // 7) Mark done / reset flags
+      await event.data.after.ref.update({
+        conceptExtractionRequested: false,
+        conceptExtractionComplete: true,
+        conceptCount: concepts.length,
+        conceptExtractionError: admin.firestore.FieldValue.delete(), // clear any previous error
+      });
+
+      console.log(
+        `Successfully stored concepts for subchapters_demo/${docId}.`
+      );
+    } catch (err) {
+      console.error("Error in concept extraction function:", err);
+      // optionally store error
+      await event.data.after.ref.update({
+        conceptExtractionRequested: false,
+        conceptExtractionError: err.message || "Unknown error"
+      });
+    }
+  }
+});
+
+
+
+
 const db = admin.firestore(); // Assuming you've already initialized admin
 
 
