@@ -3226,87 +3226,7 @@ ${promptText}
   }
 });
 
-// -------------- /api/submitQuiz --------------
-app.post("/api/submitQuiz", async (req, res) => {
-  try {
-    const {
-      userId,
-      subchapterId,
-      quizType,
-      quizSubmission,
-      score,
-      totalQuestions,
-      attemptNumber
-    } = req.body;
 
-    if (!userId || !subchapterId || !quizType || !quizSubmission || !score) {
-      return res.status(400).json({ error: "Missing required fields" });
-    }
-
-    const db = admin.firestore();
-    const docRef = await db.collection("quizzes_demo").add({
-      userId,
-      subchapterId,
-      quizType,
-      quizSubmission,
-      score,
-      totalQuestions,
-      attemptNumber,
-      timestamp: new Date(),
-    });
-
-    return res.status(200).json({
-      message: "Quiz submission saved successfully",
-      docId: docRef.id
-    });
-  } catch (error) {
-    console.error("Error in /api/submitQuiz:", error);
-    return res.status(500).json({ error: "Failed to save quiz submission" });
-  }
-});
-
-// -------------- /api/getQuiz --------------
-app.get("/api/getQuiz", async (req, res) => {
-  try {
-    const { userId, subchapterId, quizType } = req.query;
-    if (!userId || !subchapterId || !quizType) {
-      return res.status(400).json({ error: "Missing required fields" });
-    }
-
-    const db = admin.firestore();
-    const snapshot = await db
-      .collection("quizzes_demo")
-      .where("userId", "==", userId)
-      .where("subchapterId", "==", subchapterId)
-      .where("quizType", "==", quizType)
-      .orderBy("attemptNumber", "desc")
-      .get();
-
-    if (snapshot.empty) {
-      return res.json({ attempts: [] });
-    }
-
-    const attempts = snapshot.docs.map((doc) => {
-      const data = doc.data();
-      return {
-        docId: doc.id,
-        userId: data.userId,
-        subchapterId: data.subchapterId,
-        quizType: data.quizType,
-        quizSubmission: data.quizSubmission,
-        score: data.score,
-        totalQuestions: data.totalQuestions,
-        attemptNumber: data.attemptNumber,
-        timestamp: data.timestamp,
-      };
-    });
-
-    return res.json({ attempts });
-  } catch (error) {
-    console.error("Error in /api/getQuiz:", error);
-    return res.status(500).json({ error: "Failed to fetch quiz attempts" });
-  }
-});
 
 // -------------- /api/submitRevision --------------
 app.post("/api/submitRevision", async (req, res) => {
@@ -3378,6 +3298,121 @@ app.get("/api/getRevisions", async (req, res) => {
   } catch (error) {
     console.error("Error in /api/getRevisions:", error);
     return res.status(500).json({ error: "Failed to fetch revisions" });
+  }
+});
+
+/*
+
+app.post("/api/generateQuiz", async (req, res) => {
+  try {
+    const { subChapterId, questionType, numberOfQuestions } = req.body;
+    // Pull from Firestore => subchapter summary, question type doc
+    // Build a GPT prompt => call OpenAI
+    // Return JSON with "questions"
+    // (Essentially the same steps as in QuizQuestionGenerator, 
+    //  but done on the backend to hide the OpenAI key.)
+    res.json({ success: true, questions: [...] });
+  } catch (error) {
+    console.error("Error in /api/generateQuiz:", error);
+    res.status(500).json({ error: "Failed to generate quiz" });
+  }
+});
+
+*/
+
+// For storing a completed quiz attempt:
+app.post("/api/submitQuiz", async (req, res) => {
+  try {
+    // Log the entire request body for debugging
+    console.log("=== Incoming /api/submitQuiz Request Body ===");
+    console.log(req.body);
+
+    // Destructure the fields
+    const {
+      userId,
+      subchapterId,
+      quizType,
+      quizSubmission,
+      score,
+      totalQuestions,
+      attemptNumber,
+    } = req.body;
+
+    // Log the individual destructured fields
+    console.log("=== Parsed Fields ===");
+    console.log("userId:", userId);
+    console.log("subchapterId:", subchapterId);
+    console.log("quizType:", quizType);
+    console.log("quizSubmission:", quizSubmission);
+    console.log("score:", score);
+    console.log("totalQuestions:", totalQuestions);
+    console.log("attemptNumber:", attemptNumber);
+
+    // Check required fields
+    if (!userId || !subchapterId || !quizType) {
+      console.error("Missing required fields =>", {
+        userId,
+        subchapterId,
+        quizType,
+      });
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    // Proceed to store in Firestore
+    const db = admin.firestore();
+    const docRef = await db.collection("quizzes_demo").add({
+      userId,
+      subchapterId,
+      quizType,
+      quizSubmission,
+      score,
+      totalQuestions,
+      attemptNumber,
+      timestamp: new Date(),
+    });
+
+    // Log success
+    console.log("Quiz submission doc created:", docRef.id);
+
+    return res.status(200).json({
+      message: "Quiz submission saved successfully",
+      docId: docRef.id,
+    });
+  } catch (error) {
+    console.error("Error in /api/submitQuiz:", error);
+    return res.status(500).json({ error: "Failed to save quiz submission" });
+  }
+});
+
+// For retrieving quiz attempts:
+app.get("/api/getQuiz", async (req, res) => {
+  try {
+    const { userId, subchapterId, quizType } = req.query;
+    if (!userId || !subchapterId || !quizType) {
+      return res.status(400).json({ error: "Missing fields" });
+    }
+
+    const db = admin.firestore();
+    const snapshot = await db
+      .collection("quizzes_demo")
+      .where("userId", "==", userId)
+      .where("subchapterId", "==", subchapterId)
+      .where("quizType", "==", quizType)
+      .orderBy("attemptNumber", "desc")
+      .get();
+
+    if (snapshot.empty) {
+      return res.json({ attempts: [] });
+    }
+
+    const attempts = snapshot.docs.map((d) => ({
+      docId: d.id,
+      ...d.data(),
+    }));
+    return res.json({ attempts });
+  } catch (error) {
+    console.error("Error in /api/getQuiz:", error);
+    res.status(500).json({ error: "Failed to fetch quiz attempts" });
   }
 });
 
