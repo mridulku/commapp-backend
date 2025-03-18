@@ -1197,6 +1197,65 @@ Do not include extra commentary outside the JSON.
 });
 
 
+// Add this to your existing functions/index.js
+
+exports.bulkExtractConceptsForBook = onDocumentUpdated("books_demo/{bookId}", async (event) => {
+  const beforeData = event.data.before?.data() || {};
+  const afterData = event.data.after?.data() || {};
+  const bookId = event.params.bookId;
+
+  // oldVal => conceptExtractionRequested before
+  const oldVal = beforeData.conceptExtractionRequested;
+  // newVal => conceptExtractionRequested now
+  const newVal = afterData.conceptExtractionRequested;
+
+  // Only proceed if it was false/undefined, and now it's true
+  if (!oldVal && newVal) {
+    console.log(`bulkExtractConceptsForBook triggered for books_demo/${bookId}`);
+
+    try {
+      const db = admin.firestore();
+
+      // 1) Query all subchapters in "subchapters_demo" with matching bookId
+      const subChaptersSnap = await db
+        .collection("subchapters_demo")
+        .where("bookId", "==", bookId)
+        .get();
+
+      if (subChaptersSnap.empty) {
+        console.log(`No subchapters found for book ID = ${bookId}.`);
+      } else {
+        // 2) For each matching subchapter, set conceptExtractionRequested = true
+        //    which triggers your existing "extractConceptsOnFlag" function
+        const batch = db.batch();
+        subChaptersSnap.docs.forEach((subChapDoc) => {
+          batch.update(subChapDoc.ref, { conceptExtractionRequested: true });
+        });
+        await batch.commit();
+        console.log(
+          `Set conceptExtractionRequested=true for ${subChaptersSnap.size} subchapters of book ${bookId}.`
+        );
+      }
+
+      // 3) Reset the book’s flag so we don’t re-trigger
+      await event.data.after.ref.update({
+        conceptExtractionRequested: false,
+      });
+
+      console.log(`bulkExtractConceptsForBook completed for books_demo/${bookId}`);
+    } catch (err) {
+      console.error("Error in bulkExtractConceptsForBook:", err);
+      // Optionally store error info back to the book doc
+      await event.data.after.ref.update({
+        conceptExtractionError: err.message || "Unknown error",
+        conceptExtractionRequested: false,
+      });
+    }
+  }
+});
+
+
+
 
 
 const db = admin.firestore(); // Assuming you've already initialized admin
@@ -1739,10 +1798,6 @@ function getAlwaysAllActivities(subchapter, wpm) {
 
 
 
-function getDaysBetween(startDate, endDate) {
-  const msInDay = 24 * 60 * 60 * 1000;
-  return Math.ceil((endDate - startDate) / msInDay);
-}
 
 
 
