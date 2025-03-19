@@ -1074,6 +1074,8 @@ exports.updateSubChaptersDemoOnUpdate = onDocumentUpdated(
 
 
 
+
+
 exports.extractConceptsOnFlag = onDocumentUpdated("subchapters_demo/{docId}", async (event) => {
   const beforeData = event.data.before?.data() || {};
   const afterData = event.data.after?.data() || {};
@@ -1193,6 +1195,140 @@ Do not include extra commentary outside the JSON.
         conceptExtractionError: err.message || "Unknown error"
       });
     }
+  }
+});
+
+
+
+
+
+
+
+
+exports.cloneStandardBook = onRequest(async (req, res) => {
+  try {
+    // 1) Read input
+    const { standardBookId, targetUserId } = req.body || {};
+    if (!standardBookId || !targetUserId) {
+      res.status(400).json({
+        error: "Missing parameters: standardBookId, targetUserId",
+      });
+      return;
+    }
+
+    // 2) Fetch the "standard" book
+    const standardBookRef = db.collection("books_demo").doc(standardBookId);
+    const standardBookSnap = await standardBookRef.get();
+    if (!standardBookSnap.exists) {
+      res.status(404).json({ error: "Standard book not found." });
+      return;
+    }
+    const standardBookData = standardBookSnap.data() || {};
+
+    // 3) Create the new Book doc for the target user
+    const newBookData = {
+      name: standardBookData.name || "Untitled Book Copy",
+      userId: targetUserId,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+    const newBookRef = await db.collection("books_demo").add(newBookData);
+    const newBookId = newBookRef.id;
+
+    // 4) Copy chapters_demo for that standard book
+    const chaptersSnap = await db
+      .collection("chapters_demo")
+      .where("bookId", "==", standardBookId)
+      .get();
+
+    const chapterIdMap = {};
+    for (const chapterDoc of chaptersSnap.docs) {
+      const oldChapterId = chapterDoc.id;
+      const chapterData = chapterDoc.data() || {};
+
+      const newChapter = {
+        name: chapterData.name || "Untitled Chapter",
+        bookId: newBookId,
+        userId: targetUserId,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+
+      const newChapRef = await db.collection("chapters_demo").add(newChapter);
+      const newChapterId = newChapRef.id;
+
+      // Store in map so we know which old chapter maps to which new chapter
+      chapterIdMap[oldChapterId] = newChapterId;
+    }
+
+    // 5) Copy subchapters_demo; build a subchapterIdMap
+    const subchapterIdMap = {}; // oldSubId -> newSubId
+
+    // For each old chapter, find its subchapters
+    for (const oldChapterId of Object.keys(chapterIdMap)) {
+      const subchapsSnap = await db
+        .collection("subchapters_demo")
+        .where("chapterId", "==", oldChapterId)
+        .get();
+
+      const newChapterId = chapterIdMap[oldChapterId];
+
+      for (const subDoc of subchapsSnap.docs) {
+        const oldSubId = subDoc.id;
+        const sData = subDoc.data() || {};
+
+        const newSubData = {
+          name: sData.name || "Untitled Subchapter",
+          summary: sData.summary || "",
+          wordCount: sData.wordCount || 0,
+          chapterId: newChapterId,
+          bookId: newBookId,
+          userId: targetUserId,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+
+        const newSubRef = await db.collection("subchapters_demo").add(newSubData);
+        const newSubId = newSubRef.id;
+
+        // Record the mapping from old subchapter ID to new subchapter ID
+        subchapterIdMap[oldSubId] = newSubId;
+      }
+    }
+
+    // 6) Copy subchapterConcepts for each old subchapter => new subchapter
+    for (const oldSubId of Object.keys(subchapterIdMap)) {
+      const newSubId = subchapterIdMap[oldSubId];
+      const conceptsSnap = await db
+        .collection("subchapterConcepts")
+        .where("subChapterId", "==", oldSubId)
+        .get();
+
+      if (!conceptsSnap.empty) {
+        for (const cDoc of conceptsSnap.docs) {
+          const conceptData = cDoc.data() || {};
+          const newConcept = {
+            subChapterId: newSubId,
+            name: conceptData.name || "",
+            summary: conceptData.summary || "",
+            subPoints: conceptData.subPoints || [],
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+
+            // (Optional) If you also want to store who owns it, or which book it belongs to:
+            userId: targetUserId,
+            bookId: newBookId,  // only if that makes sense in your schema
+          };
+
+          await db.collection("subchapterConcepts").add(newConcept);
+        }
+      }
+    }
+
+    // 7) Return success
+    res.status(200).json({
+      message: "Book cloned successfully!",
+      newBookId: newBookId,
+    });
+  } catch (error) {
+    logger.error("Error cloning book:", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
