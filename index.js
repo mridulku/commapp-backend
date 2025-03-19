@@ -3416,6 +3416,48 @@ app.get("/api/getQuiz", async (req, res) => {
   }
 });
 
+
+
+// =======================================
+// ROUTE CATEGORY: SUBCHAPTER CONCEPTS
+// =======================================
+
+app.get("/api/getSubchapterConcepts", async (req, res) => {
+  try {
+    // 1) Grab subchapterId from query params
+    const { subchapterId } = req.query;
+    if (!subchapterId) {
+      return res.status(400).json({ error: "Missing subchapterId query param" });
+    }
+
+    // 2) Firestore query:
+    //    db.collection("subchapterConcepts").where("subChapterId", "==", subchapterId)
+    const conceptsRef = db.collection("subchapterConcepts");
+    const snapshot = await conceptsRef.where("subChapterId", "==", subchapterId).get();
+
+    if (snapshot.empty) {
+      // If no matching documents, just return an empty array
+      return res.json({ concepts: [] });
+    }
+
+    // 3) Map each doc into a plain object
+    const concepts = [];
+    snapshot.forEach((docSnap) => {
+      concepts.push({
+        id: docSnap.id,
+        ...docSnap.data(),
+      });
+    });
+
+    // 4) Return them
+    res.json({ concepts });
+  } catch (err) {
+    console.error("Error fetching subchapter concepts:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
