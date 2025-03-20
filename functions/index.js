@@ -1393,6 +1393,72 @@ exports.bulkExtractConceptsForBook = onDocumentUpdated("books_demo/{bookId}", as
 
 
 
+// If you're not on Node 18, uncomment and install node-fetch:
+// import fetch from "node-fetch";
+
+/**
+ * cloneToeflBooksOnUserCreate
+ *
+ * A Cloud Function (v2) that triggers whenever a new user doc is created in
+ * Firestore (users/{userId}).
+ * 
+ * It calls your existing "cloneStandardBook" HTTP function four times,
+ * once for each standard book ID.
+ */
+
+exports.cloneToeflBooksOnUserCreate = onDocumentCreated(
+  "users/{userId}",
+  async (event) => {
+    const userId = event.params.userId;
+    if (!userId) return;
+
+    logger.info(`User created => ${userId}`);
+
+    const standardBookIds = [
+      "NwNZ8WWCz54Y4BeCli0c",
+      "fuyAbhDo3GXLbtEdZ9jj",
+      "5UWQEvQet8GgkZmjEwAO",
+      "pFAfUSWtwipFZG2RStKg",
+    ];
+
+    const cloneFunctionURL =
+      "https://us-central1-comm-app-ff74b.cloudfunctions.net/cloneStandardBook";
+
+    const clonedResults = [];
+
+    try {
+      for (const stdBookId of standardBookIds) {
+        const resp = await fetch(cloneFunctionURL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            standardBookId: stdBookId,
+            targetUserId: userId,
+          }),
+        });
+
+        if (!resp.ok) {
+          const text = await resp.text();
+          throw new Error(`Clone request failed: ${resp.status} => ${text}`);
+        }
+        const data = await resp.json();
+        clonedResults.push({ oldBookId: stdBookId, newBookId: data.newBookId });
+      }
+
+      await event.data.ref.update({
+        clonedToeflBooks: clonedResults,
+        updatedAt: Date.now(),
+      });
+
+      logger.info("Cloned results:", clonedResults);
+    } catch (err) {
+      logger.error("Clone error:", err);
+    }
+  }
+);
+
+
+
 
 const db = admin.firestore(); // Assuming you've already initialized admin
 

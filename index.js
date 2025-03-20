@@ -1891,7 +1891,7 @@ app.get("/api/adaptive-plan", async (req, res) => {
       return res.status(400).json({ error: "Missing 'planId' in query params" });
     }
 
-    // 1) First try 'adaptive_demo'
+    // 1) Check 'adaptive_demo'
     console.log(`Checking 'adaptive_demo' for planId='${planId}'`);
     const demoRef = db.collection("adaptive_demo").doc(planId);
     const demoSnap = await demoRef.get();
@@ -1899,36 +1899,51 @@ app.get("/api/adaptive-plan", async (req, res) => {
     if (demoSnap.exists) {
       console.log(`Found doc in 'adaptive_demo' => planId='${planId}'`);
       const planData = demoSnap.data();
-      console.log("Returning planDoc from 'adaptive_demo'...");
+
+      // Attach Firestore doc ID to the returned data (so front-end can see planData.id)
+      planData.id = demoSnap.id;
+
+      console.log(
+        "Returning planDoc from 'adaptive_demo' => docId:",
+        demoSnap.id
+      );
       return res.json({ planDoc: planData });
     }
 
-    // 2) Not found in 'adaptive_demo', so check 'adaptive_books'
-    console.log(`Not found in 'adaptive_demo'. Checking 'adaptive_books' for planId='${planId}'`);
+    // 2) If not found in 'adaptive_demo', check 'adaptive_books'
+    console.log(
+      `Not found in 'adaptive_demo'. Checking 'adaptive_books' for planId='${planId}'`
+    );
     const booksRef = db.collection("adaptive_books").doc(planId);
     const booksSnap = await booksRef.get();
 
     if (booksSnap.exists) {
       console.log(`Found doc in 'adaptive_books' => planId='${planId}'`);
       const planData = booksSnap.data();
-      console.log("Returning planDoc from 'adaptive_books'...");
+
+      // Also attach doc ID here
+      planData.id = booksSnap.id;
+
+      console.log(
+        "Returning planDoc from 'adaptive_books' => docId:",
+        booksSnap.id
+      );
       return res.json({ planDoc: planData });
     }
 
-    // 3) Not found in either collection => 404
+    // 3) If not found in either collection => 404
     console.log(
       `Document '${planId}' not found in 'adaptive_demo' nor 'adaptive_books'`
     );
-    return res
-      .status(404)
-      .json({ error: `Plan document ${planId} not found in any collection` });
+    return res.status(404).json({
+      error: `Plan document ${planId} not found in any collection`,
+    });
   } catch (error) {
     console.error("Error in /api/adaptive-plan route:", error);
     logger.error("Error fetching plan from adaptive_demo/books:", error);
     return res.status(500).json({ error: error.message });
   }
 });
-
 
 
 
@@ -3230,13 +3245,11 @@ ${promptText}
 
 // -------------- /api/submitRevision --------------
 app.post("/api/submitRevision", async (req, res) => {
+  console.log("=== /api/submitRevision Request Body ===", req.body);
+
   try {
-    const {
-      userId,
-      subchapterId,
-      revisionType,
-      revisionNumber
-    } = req.body;
+    const { userId, subchapterId, revisionType, revisionNumber, planId } = req.body;
+    console.log("Parsed fields =>", { userId, subchapterId, revisionType, revisionNumber, planId });
 
     if (!userId || !subchapterId || !revisionType || !revisionNumber) {
       return res.status(400).json({ error: "Missing required fields" });
@@ -3248,6 +3261,7 @@ app.post("/api/submitRevision", async (req, res) => {
       subchapterId,
       revisionType,
       revisionNumber,
+      planId: planId ?? null,  // store planId if present
       timestamp: new Date(),
     });
 
@@ -3322,12 +3336,11 @@ app.post("/api/generateQuiz", async (req, res) => {
 
 // For storing a completed quiz attempt:
 app.post("/api/submitQuiz", async (req, res) => {
-  try {
-    // Log the entire request body for debugging
-    console.log("=== Incoming /api/submitQuiz Request Body ===");
-    console.log(req.body);
+  // 1) Log the entire request body right away
+  console.log("=== /api/submitQuiz Request Body ===", req.body);
 
-    // Destructure the fields
+  try {
+    // 2) Destructure the fields, then log them
     const {
       userId,
       subchapterId,
@@ -3336,30 +3349,34 @@ app.post("/api/submitQuiz", async (req, res) => {
       score,
       totalQuestions,
       attemptNumber,
+      planId // <-- accept it
     } = req.body;
 
-    // Log the individual destructured fields
-    console.log("=== Parsed Fields ===");
-    console.log("userId:", userId);
-    console.log("subchapterId:", subchapterId);
-    console.log("quizType:", quizType);
-    console.log("quizSubmission:", quizSubmission);
-    console.log("score:", score);
-    console.log("totalQuestions:", totalQuestions);
-    console.log("attemptNumber:", attemptNumber);
+    console.log("[submitQuiz] Parsed fields =>", {
+      userId,
+      subchapterId,
+      quizType,
+      quizSubmission,
+      score,
+      totalQuestions,
+      attemptNumber,
+      planId
+    });
 
-    // Check required fields
+    // 3) Basic validation
     if (!userId || !subchapterId || !quizType) {
-      console.error("Missing required fields =>", {
+      console.error("[submitQuiz] Missing required fields =>", {
         userId,
         subchapterId,
-        quizType,
+        quizType
       });
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // Proceed to store in Firestore
+    // 4) About to write to Firestore
+    console.log("[submitQuiz] About to write doc in 'quizzes_demo' collection...");
     const db = admin.firestore();
+
     const docRef = await db.collection("quizzes_demo").add({
       userId,
       subchapterId,
@@ -3368,17 +3385,20 @@ app.post("/api/submitQuiz", async (req, res) => {
       score,
       totalQuestions,
       attemptNumber,
+      planId: planId ?? null, // store planId or null
       timestamp: new Date(),
     });
 
-    // Log success
-    console.log("Quiz submission doc created:", docRef.id);
+    console.log("[submitQuiz] Quiz submission doc created with ID:", docRef.id);
 
+    // 5) Return success
     return res.status(200).json({
       message: "Quiz submission saved successfully",
       docId: docRef.id,
     });
+
   } catch (error) {
+    // 6) Log the entire error object or stack trace
     console.error("Error in /api/submitQuiz:", error);
     return res.status(500).json({ error: "Failed to save quiz submission" });
   }
