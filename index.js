@@ -3278,19 +3278,26 @@ app.post("/api/submitRevision", async (req, res) => {
 // -------------- /api/getRevisions --------------
 app.get("/api/getRevisions", async (req, res) => {
   try {
-    const { userId, subchapterId, revisionType } = req.query;
-    if (!userId || !subchapterId || !revisionType) {
-      return res.status(400).json({ error: "Missing required fields" });
+    const { userId, subchapterId, revisionType, planId } = req.query;
+
+    // Make them all mandatory
+    if (!userId || !subchapterId || !revisionType || !planId) {
+      return res.status(400).json({
+        error: "Missing required fields: userId, subchapterId, revisionType, planId"
+      });
     }
 
     const db = admin.firestore();
-    const snapshot = await db
+    let ref = db
       .collection("revisions_demo")
       .where("userId", "==", userId)
       .where("subchapterId", "==", subchapterId)
       .where("revisionType", "==", revisionType)
-      .orderBy("revisionNumber", "desc")
-      .get();
+      .where("planId", "==", planId); // mandatory
+
+    ref = ref.orderBy("revisionNumber", "desc");
+
+    const snapshot = await ref.get();
 
     if (snapshot.empty) {
       return res.json({ revisions: [] });
@@ -3304,6 +3311,7 @@ app.get("/api/getRevisions", async (req, res) => {
         subchapterId: data.subchapterId,
         revisionType: data.revisionType,
         revisionNumber: data.revisionNumber,
+        planId: data.planId,  // just to confirm we see it
         timestamp: data.timestamp,
       };
     });
@@ -3407,19 +3415,26 @@ app.post("/api/submitQuiz", async (req, res) => {
 // For retrieving quiz attempts:
 app.get("/api/getQuiz", async (req, res) => {
   try {
-    const { userId, subchapterId, quizType } = req.query;
-    if (!userId || !subchapterId || !quizType) {
-      return res.status(400).json({ error: "Missing fields" });
+    const { userId, subchapterId, quizType, planId } = req.query;
+
+    // Make them all mandatory
+    if (!userId || !subchapterId || !quizType || !planId) {
+      return res.status(400).json({
+        error: "Missing required fields: userId, subchapterId, quizType, planId"
+      });
     }
 
     const db = admin.firestore();
-    const snapshot = await db
+    let ref = db
       .collection("quizzes_demo")
       .where("userId", "==", userId)
       .where("subchapterId", "==", subchapterId)
       .where("quizType", "==", quizType)
-      .orderBy("attemptNumber", "desc")
-      .get();
+      .where("planId", "==", planId);  // mandatory
+
+    ref = ref.orderBy("attemptNumber", "desc");
+
+    const snapshot = await ref.get();
 
     if (snapshot.empty) {
       return res.json({ attempts: [] });
@@ -3435,8 +3450,6 @@ app.get("/api/getQuiz", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch quiz attempts" });
   }
 });
-
-
 
 // =======================================
 // ROUTE CATEGORY: SUBCHAPTER CONCEPTS
