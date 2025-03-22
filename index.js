@@ -3491,6 +3491,57 @@ app.get("/api/getSubchapterConcepts", async (req, res) => {
 });
 
 
+
+app.post("/api/submitReading", async (req, res) => {
+  console.log("=== /api/submitReading Request Body ===", req.body);
+
+  try {
+    const {
+      userId,
+      subChapterId,
+      readingStartTime,
+      readingEndTime,
+      productReadingPerformance,
+      planId,
+      timestamp,
+    } = req.body;
+
+    // Basic validation
+    if (!userId || !subChapterId || !readingStartTime || !readingEndTime) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing required fields: userId, subChapterId, readingStartTime, readingEndTime",
+      });
+    }
+
+    const db = admin.firestore();
+
+    // Create a doc in "reading_demo" (or any name you prefer)
+    const docRef = await db.collection("reading_demo").add({
+      userId,
+      subChapterId,
+      readingStartTime: new Date(readingStartTime),
+      readingEndTime: new Date(readingEndTime),
+      productReadingPerformance: productReadingPerformance ?? null,
+      planId: planId ?? null,
+      timestamp: timestamp ? new Date(timestamp) : new Date(), // fallback to "now"
+    });
+
+    return res.status(200).json({
+      success: true,
+      docId: docRef.id,
+      message: "Reading record saved successfully",
+    });
+  } catch (error) {
+    console.error("Error in /api/submitReading:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to save reading record",
+    });
+  }
+});
+
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
