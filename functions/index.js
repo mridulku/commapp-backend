@@ -2834,3 +2834,453 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
   }
 });
 
+
+
+
+
+
+/**
+ * 1) onExamPDFUpload
+ * ------------------
+ * Triggered whenever a PDF is uploaded to Cloud Storage
+ * with metadata.category = "examPaper".
+ * We parse the PDF text using pdf-parse, then store it in examPdfExtracts.
+ */
+exports.onExamPDFUpload = onObjectFinalized(async (event) => {
+  try {
+    const object = event.data;
+    if (!object) {
+      logger.info("No object data in event, skipping.");
+      return;
+    }
+
+    const { contentType, name: filePath, bucket } = object;
+    const metadata = object.metadata || {};
+    const category = metadata.category || "unspecified";
+    const userId = metadata.userId || "unknownUser";
+    const examName = metadata.examName || "Unknown Exam";
+
+    // Only proceed if category = "examPaper"
+    if (category !== "examPaper") {
+      logger.info(`Skipping: category=${category} is not 'examPaper'.`);
+      return;
+    }
+
+    // Only proceed if it's a PDF
+    if (!contentType || !contentType.includes("pdf")) {
+      logger.info(`Skipping: contentType is not a PDF: ${contentType}`);
+      return;
+    }
+
+    logger.info(`Exam paper PDF detected at path: ${filePath}`);
+
+    // 1) Download PDF to /tmp
+    const tempFilePath = path.join("/tmp", path.basename(filePath));
+    await storage.bucket(bucket).file(filePath).download({ destination: tempFilePath });
+    logger.info(`Exam PDF downloaded locally => ${tempFilePath}`);
+
+    // 2) Parse PDF text
+    const pdfBuffer = fs.readFileSync(tempFilePath);
+    const pdfData = await pdfParse(pdfBuffer);
+    const fullText = pdfData.text || "";
+    logger.info(`Parsed exam PDF text length: ${fullText.length}`);
+
+    // 3) Store doc in examPdfExtracts
+    //    We'll store raw text, the user info, etc.
+    const ref = db.collection("examPdfExtracts").doc();
+    await ref.set({
+      filePath,
+      rawText: fullText,
+      category: "examPaper",
+      userId,
+      examName,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    logger.info(`Created examPdfExtracts doc => ${ref.id}`);
+  } catch (err) {
+    logger.error("Error in onExamPDFUpload for examPaper:", err);
+  }
+});
+
+/**
+ * 2) parseExamPaperIntoQuestions
+ * ------------------------------
+ * Triggered when a new doc is created in examPdfExtracts/{docId} with category="examPaper".
+ * We call GPT to parse the rawText into a JSON array of questions,
+ * then store that array in examQuestionSets.
+ */
+
+exports.parseExamPaperIntoQuestions = onDocumentCreated("examPdfExtracts/{docId}", async (event) => {
+  try {
+    const docSnap = event.data;
+    if (!docSnap) {
+      logger.info("No doc snapshot found in parseExamPaperIntoQuestions event.");
+      return;
+    }
+
+    const data = docSnap.data() || {};
+    const docId = event.params.docId;
+    const { category, rawText, userId, examName } = data;
+
+    // Only proceed if category = "examPaper"
+    if (category !== "examPaper") {
+      logger.info(`Doc ${docId} not examPaper => skipping parseExamPaperIntoQuestions.`);
+      return;
+    }
+
+    // If no text, skip
+    if (!rawText) {
+      logger.info("No rawText found for examPaper doc, skipping GPT parse.");
+      return;
+    }
+
+    logger.info(`Parsing exam paper => docId=${docId}, examName="${examName}"`);
+
+    // -------------------------------------------------------
+    // 1) Set up OpenAI
+    // -------------------------------------------------------
+    // (A) Option 1: Use environment variable
+    // const openAiKey = process.env.OPENAI_API_KEY;
+
+    // (B) Option 2: Use firebase config: functions.config().openai.apikey
+    //   if you did: firebase functions:config:set openai.apikey="sk-..."
+    // const openAiKey = functions.config().openai.apikey;
+
+    // For this snippet, we assume environment variable:
+    const openAiKey = process.env.OPENAI_API_KEY;
+    if (!openAiKey) {
+      logger.error("OPENAI_API_KEY not set in env!");
+      return;
+    }
+
+    const configuration = new Configuration({ apiKey: openAiKey });
+    const openai = new OpenAIApi(configuration);
+
+    // -------------------------------------------------------
+    // 2) Build GPT prompt
+    // -------------------------------------------------------
+    const prompt = `
+You are analyzing an exam question paper.
+Extract each question you find and return a JSON array of objects.
+Each object should look like:
+{
+  "questionNumber": (string or number),
+  "questionText": "...",
+  "options": ["...","..."] // if multiple-choice,
+  "marks": "...",
+  "section": "...", 
+  "instructions": "...",
+  "otherInfo": "..."
+}
+
+Do NOT include any extra commentary — only valid JSON.
+
+Exam Paper Text:
+${rawText}
+`.trim();
+
+    // -------------------------------------------------------
+    // 3) Call GPT
+    // -------------------------------------------------------
+    const completion = await openai.createChatCompletion({
+      model: "gpt-3.5-turbo",
+      messages: [
+        { role: "system", content: "You are a structured data extraction assistant." },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.7,
+    });
+
+    let gptOutput = completion.data.choices[0].message.content.trim();
+    logger.info("GPT question extraction output (first 200 chars):", gptOutput.slice(0, 200), "...");
+
+    // -------------------------------------------------------
+    // 4) Strip any code fences before parse
+    // -------------------------------------------------------
+    // GPT might return something like:
+    // ```json
+    // [ { "questionNumber": 1, "questionText": ... } ]
+    // ```
+    // That leading ``` would break JSON.parse, so remove them:
+    const cleanedOutput = gptOutput
+      .replace(/^```(\w+)?/, "") // remove ```json or ```
+      .replace(/```$/, "")       // remove final ```
+      .trim();
+
+    // Attempt to parse the cleaned JSON
+    let parsedQuestions = [];
+    try {
+      parsedQuestions = JSON.parse(cleanedOutput);
+    } catch (jsonErr) {
+      logger.error("Error parsing GPT question JSON:", jsonErr);
+      return;
+    }
+
+    // -------------------------------------------------------
+    // 5) Store in examQuestionSets
+    // -------------------------------------------------------
+    // (One doc containing the entire array of extracted questions)
+    const ref = await db.collection("examQuestionSets").add({
+      examPdfId: docId,
+      userId,
+      examName,
+      questions: parsedQuestions,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    logger.info(
+      `Stored ${parsedQuestions.length} questions in examQuestionSets => docId=${ref.id}`
+    );
+  } catch (err) {
+    logger.error("Error in parseExamPaperIntoQuestions:", err);
+  }
+});
+
+
+/**
+ * 3) splitExamQuestionSets (Optional)
+ * -----------------------------------
+ * If you want to create one doc per question, you can do so here.
+ * We'll listen for new docs in examQuestionSets/{docId}, 
+ * then iterate the 'questions' array to create individual docs in examQuestions.
+ */
+exports.splitExamQuestionSets = onDocumentCreated("examQuestionSets/{setId}", async (event) => {
+  try {
+    const docSnap = event.data;
+    if (!docSnap) {
+      logger.info("No doc snapshot in splitExamQuestionSets event.");
+      return;
+    }
+
+    const setId = event.params.setId;
+    const data = docSnap.data() || {};
+    const { userId, examPdfId, examName, questions } = data;
+
+    if (!questions || !Array.isArray(questions)) {
+      logger.info(`No 'questions' array found in examQuestionSets docId=${setId}. Skipping.`);
+      return;
+    }
+
+    // Create a doc per question in examQuestions
+    const batch = admin.firestore().batch();
+
+    questions.forEach((qObj) => {
+      const newDocRef = db.collection("examQuestions").doc();
+      batch.set(newDocRef, {
+        examPdfId,
+        userId,
+        examName,
+        questionNumber: qObj.questionNumber || "",
+        questionText: qObj.questionText || "",
+        options: qObj.options || [],
+        marks: qObj.marks || "",
+        section: qObj.section || "",
+        instructions: qObj.instructions || "",
+        otherInfo: qObj.otherInfo || "",
+        parentSetId: setId,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+
+    await batch.commit();
+    logger.info(
+      `Created ${questions.length} examQuestions docs from examQuestionSets/${setId}.`
+    );
+  } catch (err) {
+    logger.error("Error in splitExamQuestionSets:", err);
+  }
+});
+
+
+
+
+/**
+ * onExamGuidelinesPDFUpload:
+ *  - Triggered by a PDF upload with metadata.category = "examGuidelines".
+ *  - We parse the PDF text with pdf-parse, store in `examGuidelinesExtracts`.
+ */
+exports.onExamGuidelinesPDFUpload = onObjectFinalized(async (event) => {
+  try {
+    const object = event.data;
+    if (!object) {
+      logger.info("No object data in event, skipping onExamGuidelinesPDFUpload.");
+      return;
+    }
+
+    const { contentType, name: filePath, bucket } = object;
+    const metadata = object.metadata || {};
+    const category = metadata.category || "unspecified";
+    const userId = metadata.userId || "unknownUser";
+    const examTitle = metadata.examTitle || "UnnamedExamGuidelines";
+
+    // 1) Check if category=examGuidelines
+    if (category !== "examGuidelines") {
+      logger.info(`Not an examGuidelines PDF. Skipping. category=${category}`);
+      return;
+    }
+
+    // 2) Check it's actually a PDF
+    if (!contentType || !contentType.includes("pdf")) {
+      logger.info(`File is not a PDF (${contentType}). Skipping examGuidelines parse.`);
+      return;
+    }
+
+    logger.info(`Exam Guidelines PDF detected: bucket=${bucket}, path=${filePath}`);
+
+    // Download to /tmp
+    const tempFilePath = path.join("/tmp", path.basename(filePath));
+    await storage.bucket(bucket).file(filePath).download({ destination: tempFilePath });
+    logger.info(`Exam guidelines PDF downloaded locally to ${tempFilePath}`);
+
+    // Parse with pdf-parse
+    const pdfBuf = fs.readFileSync(tempFilePath);
+    const pdfData = await pdfParse(pdfBuf);
+    const fullText = pdfData.text || "";
+
+    // Store in examGuidelinesExtracts
+    const ref = db.collection("examGuidelinesExtracts").doc();
+    await ref.set({
+      filePath,
+      rawText: fullText,
+      category: "examGuidelines",
+      userId,
+      examTitle,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    logger.info(`Created doc in examGuidelinesExtracts => ${ref.id}, length=${fullText.length}`);
+  } catch (err) {
+    logger.error("Error in onExamGuidelinesPDFUpload:", err);
+  }
+});
+
+
+/**
+ * parseExamGuidelines:
+ *  - Trigger: new doc in examGuidelinesExtracts
+ *  - If category=examGuidelines, calls GPT to parse rawText => structured JSON
+ *  - Then stores in examGuidelinesData collection
+ */
+exports.parseExamGuidelines = onDocumentCreated("examGuidelinesExtracts/{docId}", async (event) => {
+  try {
+    const docSnap = event.data;
+    if (!docSnap) {
+      logger.info("No doc snapshot in parseExamGuidelines.");
+      return;
+    }
+
+    const data = docSnap.data() || {};
+    const docId = event.params.docId;
+    const { category, rawText, userId, examTitle } = data;
+
+    if (category !== "examGuidelines") {
+      logger.info(`Doc ${docId} is not examGuidelines => skipping parseExamGuidelines.`);
+      return;
+    }
+
+    if (!rawText) {
+      logger.info("No rawText found => skipping GPT parse for guidelines.");
+      return;
+    }
+
+    // Set up OpenAI
+    // Option A: environment variable
+    const openAiKey = process.env.OPENAI_API_KEY;
+    // Option B: firebase functions config => e.g. functions.config().openai.apikey
+    if (!openAiKey) {
+      logger.error("OPENAI_API_KEY not set in env!");
+      return;
+    }
+
+    const configuration = new Configuration({ apiKey: openAiKey });
+    const openai = new OpenAIApi(configuration);
+
+    // Build the prompt with a suggested JSON structure:
+    const prompt = `
+You are analyzing exam guidelines. Return valid JSON ONLY, in this structure:
+
+{
+  "examName": "...",
+  "format": "...",
+  "timeAllowed": "...",
+  "passingScore": "...",
+  "sections": [
+    {
+      "sectionName": "...",
+      "marks": "...",
+      "timeSuggestion": "...",
+      "topics": [
+        {
+          "topicName": "...",
+          "subtopics": [
+            { "subtopicName": "...", "notes": "", "weightage": "" }
+          ],
+          "weightage": "",
+          "notes": ""
+        }
+      ],
+      "instructions": ""
+    }
+  ],
+  "overallWeightage": [
+    { "topic": "...", "percentage": 0 }
+  ],
+  "resourcesAllowed": "",
+  "scoringRubric": "",
+  "examDayInstructions": "",
+  "unstructuredText": ""
+}
+
+- If some field is not found, leave it blank or empty.
+- Place any leftover text or info you can't categorize into "unstructuredText".
+- Do NOT wrap your JSON in backticks or code fences. 
+- NO extra commentary, only JSON.
+
+Exam Guidelines Source Text:
+${rawText}
+`.trim();
+
+    logger.info(`parseExamGuidelines => docId=${docId}, examTitle="${examTitle}"`);
+
+    // GPT call
+    const completion = await openai.createChatCompletion({
+      model: "gpt-3.5-turbo",  // or your chosen model
+      messages: [
+        { role: "system", content: "You are a structured data extraction assistant." },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.7,
+    });
+
+    let gptOutput = completion.data.choices[0].message.content.trim();
+    logger.info("GPT guidelines JSON output (first 200 chars):", gptOutput.slice(0, 200), "...");
+
+    // Strip possible code fences (```) or ```json
+    const cleanedOutput = gptOutput
+      .replace(/^```(\w+)?/, "") // remove leading ``` or ```json
+      .replace(/```$/, "")       // remove trailing ```
+      .trim();
+
+    let parsedData;
+    try {
+      parsedData = JSON.parse(cleanedOutput);
+    } catch (jsonErr) {
+      logger.error("Error parsing GPT examGuidelines JSON:", jsonErr);
+      return;
+    }
+
+    // Store in examGuidelinesData
+    const newRef = await db.collection("examGuidelinesData").add({
+      guidelinesExtractId: docId, // link to the source doc
+      userId,
+      examTitle,
+      structuredGuidelines: parsedData,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    logger.info(`Parsed guidelines JSON stored => docId=${newRef.id}`);
+  } catch (err) {
+    logger.error("Error in parseExamGuidelines:", err);
+  }
+});
