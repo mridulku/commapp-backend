@@ -3835,3 +3835,265 @@ exports.onGuidelinesConceptMapCreated = onDocumentCreated("guidelinesConceptMaps
     logger.error("Error in onGuidelinesConceptMapCreated:", err);
   }
 });
+
+
+
+
+/**
+ * classifyQuestionDepthHTTP (v2)
+ * ------------------------------
+ * Trigger with:  GET/POST ?bookId=xxx&userId=yyy
+ *
+ * 1) Fetch examQuestions for that bookId & userId
+ * 2) For each question:
+ *    - gather the subchapter content for the subchapters that are relevant
+ *      (based on the question's concept array -> each concept doc -> subChapterId -> subchapters_demo doc)
+ *    - build a GPT prompt
+ *    - call GPT => parse JSON => store result in the question doc
+ */
+exports.classifyQuestionDepthHTTP = onRequest(async (req, res) => {
+  try {
+    const { bookId, userId } = req.query;
+    if (!bookId || !userId) {
+      return res.status(400).send("Missing bookId or userId in query params.");
+    }
+
+    logger.info(`classifyQuestionDepthHTTP => bookId=${bookId}, userId=${userId}`);
+
+    // 1) Fetch examQuestions for this bookId & userId
+    const qSnap = await db
+      .collection("examQuestions")
+      .where("bookId", "==", bookId)
+      .where("userId", "==", userId)
+      .get();
+    if (qSnap.empty) {
+      return res.status(200).send("No examQuestions found for that book/user.");
+    }
+
+    // 2) We'll also need a quick way to get subchapter content
+    //    We'll build a cache: subchapterContents[subChId] = { fullText, name, etc. }
+    const subchapterCache = {};
+
+    // 3) We'll set up GPT
+    const openAiKey = getOpenAiKey();
+    if (!openAiKey) {
+      return res.status(500).send("No OPENAI_API_KEY set!");
+    }
+    const configuration = new Configuration({ apiKey: openAiKey });
+    const openai = new OpenAIApi(configuration);
+
+    let processedCount = 0;
+    // We'll do a for..of or forEach, but note that async in a forEach can cause concurrency issues.
+    // For simplicity, let's do a for..of loop so we can do sequential GPT calls.
+    const questionDocs = qSnap.docs;
+
+    for (const qDoc of questionDocs) {
+      const questionData = qDoc.data();
+      const questionId = qDoc.id;
+
+      logger.info(`Processing questionId=${questionId}`);
+
+      // 2a) Gather subchapter content from the question's concepts
+      //     questionData.concepts = [conceptId1, conceptId2...]
+      // We'll fetch each concept's doc => subChapterId => subchapters_demo doc => store in subchapterCache
+      const conceptIds = questionData.concepts || [];
+      const subchapTexts = await buildSubchapterContext(conceptIds, subchapterCache);
+
+      // 2b) Build GPT prompt
+      // We'll pass in the question text, marks, type, etc.
+      // We'll also pass subchapter context(s).
+      const promptText = createPromptForQuestion({
+        questionObj: questionData,
+        questionId,
+        subchapterTexts: subchapTexts,  // array of { subChapterId, subName, fullText, conceptList }
+      });
+
+      logger.info(`Prompt length for Q=${questionId} => ${promptText.length} chars.`);
+
+      // 2c) Call GPT
+      const completion = await openai.createChatCompletion({
+        model: "gpt-3.5-turbo", // or your model
+        messages: [
+          { role: "system", content: "You are a structured classification assistant." },
+          { role: "user", content: promptText },
+        ],
+        temperature: 0.7,
+      });
+
+      const gptOutput = completion.data.choices[0].message.content.trim();
+      logger.info(`GPT output for Q=${questionId} (first 200 chars): ${gptOutput.slice(0, 200)}...`);
+
+      // 2d) We expect GPT to return JSON. We'll parse it
+      let parsed;
+      try {
+        const cleaned = gptOutput
+          .replace(/^```(\w+)?/, "")
+          .replace(/```$/, "")
+          .trim();
+        parsed = JSON.parse(cleaned);
+      } catch (err) {
+        logger.error(`Error parsing GPT JSON for questionId=${questionId}`, err);
+        // We'll store an error field
+        await qDoc.ref.update({
+          classificationError: "Failed to parse GPT JSON",
+          classificationRaw: gptOutput,
+        });
+        continue; // move to next question
+      }
+
+      // 2e) Now we have something like:
+      // {
+      //   "questionType": "multipleChoice",
+      //   "bloomLevels": ["Understand", "Apply"], 
+      //   "reasoning": "...optional explanation..."
+      //   ...
+      // }
+      // We'll store these in the question doc
+      await qDoc.ref.update({
+        questionType: parsed.questionType || null,
+        bloomLevels: parsed.bloomLevels || [],
+        classificationJSON: parsed, // keep raw if you want
+        classificationTime: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      processedCount++;
+      logger.info(`QuestionId=${questionId} => classification updated in examQuestions.`);
+
+      // (Optional) if you worry about time/cost, you can do a short pause or break early
+    }
+
+    return res.status(200).send(`Processed ${processedCount} questions for classification.`);
+  } catch (err) {
+    logger.error("Error in classifyQuestionDepthHTTP:", err);
+    return res.status(500).send("Error. Check logs.");
+  }
+});
+
+/**
+ * buildSubchapterContext
+ * ----------------------
+ * For each conceptId, fetch concept doc => subChapterId => fetch subchapter doc 
+ * => gather subchapter content. We'll store in subchapterCache so we don't re-fetch.
+ * 
+ * We'll return an array of { subChapterId, subName, fullText, conceptList: [...] } 
+ * so we can unify multiple concepts from the same subchapter in one block of text.
+ */
+async function buildSubchapterContext(conceptIds, cache) {
+  // We'll build a map: subChId => { subChapterId, subName, fullText, conceptIds: [] }
+  const subMap = {};
+
+  // 1) fetch concept docs
+  const conceptDocs = [];
+  for (const cId of conceptIds) {
+    const cRef = db.collection("subchapterConcepts").doc(cId);
+    const cSnap = await cRef.get();
+    if (cSnap.exists) {
+      const cData = cSnap.data();
+      conceptDocs.push({ cId, ...cData });
+    }
+  }
+
+  // 2) For each concept doc => subChapterId => fetch subchapters_demo doc if not cached
+  for (const cObj of conceptDocs) {
+    const scId = cObj.subChapterId;
+    if (!scId) continue;
+
+    // check subMap
+    if (!subMap[scId]) {
+      // fetch from cache or Firestore
+      if (!cache[scId]) {
+        // fetch from subchapters_demo
+        const scRef = db.collection("subchapters_demo").doc(scId);
+        const scSnap = await scRef.get();
+        if (!scSnap.exists) {
+          cache[scId] = { subChapterId: scId, name: `subch(${scId})`, fullText: "No content found." };
+        } else {
+          const scData = scSnap.data();
+          const scName = scData.name || `subch(${scId})`;
+          const scContent = scData.fullText || scData.content || "No subchapter text found.";
+          cache[scId] = { subChapterId: scId, name: scName, fullText: scContent };
+        }
+      }
+      // create subMap entry
+      subMap[scId] = {
+        subChapterId: scId,
+        subName: cache[scId].name,
+        fullText: cache[scId].fullText,
+        conceptIds: [],
+      };
+    }
+
+    // add this concept to subMap[scId].conceptIds
+    subMap[scId].conceptIds.push({ conceptId: cObj.cId, conceptName: cObj.name || cObj.id });
+  }
+
+  // 3) return array
+  return Object.values(subMap).map((obj) => {
+    return {
+      subChapterId: obj.subChapterId,
+      subName: obj.subName,
+      fullText: obj.fullText,
+      conceptList: obj.conceptIds, 
+    };
+  });
+}
+
+/**
+ * createPromptForQuestion
+ * -----------------------
+ * Build the prompt text for GPT. We include:
+ *  - question text
+ *  - question marks
+ *  - subchapter content
+ *  - concept list
+ * Then we instruct GPT to classify question type & bloom level, returning JSON.
+ */
+function createPromptForQuestion({ questionObj, questionId, subchapterTexts }) {
+  // questionObj might have questionText, marks, options if MCQ, etc.
+  const qText = questionObj.questionText || "No question text";
+  const qMarks = questionObj.marks || 0;
+  const qOptions = questionObj.options || []; // if it's a multipleChoice style
+  let optionsBlock = "";
+  if (qOptions.length > 0) {
+    optionsBlock = "\nOptions:\n" + qOptions.map((opt, i) => ` - ${opt}`).join("\n");
+  }
+
+  // subchapterTexts is an array of { subChapterId, subName, fullText, conceptList:[{conceptId, conceptName}]}
+  let subchBlock = "";
+  subchapterTexts.forEach((sc) => {
+    subchBlock += `\n--- Subchapter: ${sc.subName} (ID=${sc.subChapterId})\n`;
+    subchBlock += `Concepts:\n`;
+    sc.conceptList.forEach((c) => {
+      subchBlock += `   - ${c.conceptName} (conceptId=${c.conceptId})\n`;
+    });
+    subchBlock += `Content:\n${sc.fullText}\n\n`;
+  });
+
+  // The final instructions:
+  const instructions = `
+You are classifying a single exam question in detail. 
+We provide:
+ - The question text and marks
+ - Possibly MCQ options
+ - Subchapter contents + concept info to show context
+
+Return valid JSON ONLY with fields:
+{
+  "questionType": "...",   // e.g. "multipleChoice", "shortAnswer", "longForm", ...
+  "bloomLevels": ["..."],  // array of one or more Bloom's taxonomy levels ("Remember","Understand","Apply","Analyze","Evaluate","Create")
+  "notes": "short explanation if needed"
+}
+
+No code fences, no extra commentary—only valid JSON.
+
+Question:
+ID=${questionId}, marks=${qMarks}
+Text: ${qText}
+${optionsBlock}
+
+Subchapter Context:
+${subchBlock}
+`.trim();
+
+  return instructions;
+}
