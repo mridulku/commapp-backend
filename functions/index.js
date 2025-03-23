@@ -3525,6 +3525,7 @@ exports.onQuestionConceptMapCreated = onDocumentCreated("questionConceptMaps/{do
  * computing examPresenceScore based on # of questionRefs and question marks.
  * We also factor in the question's "marks" if you want to weight by that.
  */
+
 exports.recalculateConceptScores = onRequest(async (req, res) => {
   try {
     const { bookId } = req.query;
@@ -3540,12 +3541,15 @@ exports.recalculateConceptScores = onRequest(async (req, res) => {
       .where("bookId", "==", bookId)
       .get();
 
-    // 2) We'll also fetch the examQuestions to see their marks
+    // 2) We'll also fetch the examQuestions to see their marks & their concept arrays
     const qSnap = await db
       .collection("examQuestions")
       .where("bookId", "==", bookId)
       .get();
-    const questionMap = {}; // questionId -> { marks, etc. }
+
+    // Build a map questionId -> questionObj
+    // questionObj should contain .marks and .concepts array
+    const questionMap = {};
     qSnap.forEach((qDoc) => {
       questionMap[qDoc.id] = qDoc.data();
     });
@@ -3553,27 +3557,37 @@ exports.recalculateConceptScores = onRequest(async (req, res) => {
     let batch = db.batch();
     let opsCount = 0;
 
-    cSnap.forEach((doc) => {
-      const cData = doc.data() || {};
-      const questionRefs = cData.questionRefs || [];
-      // We'll sum the marks from each question reference for a final "examPresenceScore"
+    // For each concept doc, sum up partial marks from each questionRef
+    cSnap.forEach((conceptDoc) => {
+      const conceptData = conceptDoc.data() || {};
+      const questionRefs = conceptData.questionRefs || [];
+
       let totalMarks = 0;
+
       questionRefs.forEach((qId) => {
         const qObj = questionMap[qId] || {};
         const qMarks = qObj.marks || 0;
-        totalMarks += qMarks; 
+        const qConcepts = qObj.concepts || [];  // The array of conceptIds that question references
+
+        if (qConcepts.length > 0) {
+          // Dividing the question's total marks among all concepts it references
+          const fraction = qMarks / qConcepts.length;
+          totalMarks += fraction;
+        } else {
+          // If somehow question has no .concepts array, fallback
+          totalMarks += qMarks;
+        }
       });
 
-      // If you want a simpler approach (just count of questionRefs), you can do:
-      // const examPresenceScore = questionRefs.length;
-      // But let's do totalMarks for a more weighted approach
+      // Now we have a partial sum for each concept
       const examPresenceScore = totalMarks;
 
-      // Update doc
-      const cRef = db.collection("subchapterConcepts").doc(doc.id);
-      batch.update(cRef, { examPresenceScore });
+      // Update the concept doc
+      const ref = db.collection("subchapterConcepts").doc(conceptDoc.id);
+      batch.update(ref, { examPresenceScore });
       opsCount++;
 
+      // If we approach batch limit
       if (opsCount >= 400) {
         batch.commit();
         batch = db.batch();
@@ -3585,14 +3599,13 @@ exports.recalculateConceptScores = onRequest(async (req, res) => {
       await batch.commit();
     }
 
-    logger.info("recalculateConceptScores => done. Weighted by total question marks.");
-    return res.status(200).send("Concept scores recalculated successfully!");
+    logger.info("recalculateConceptScores => done (divided question marks among concepts).");
+    return res.status(200).send("Concept scores recalculated (shared marks)!");
   } catch (err) {
     logger.error("Error in recalculateConceptScores:", err);
-    return res.status(500).send("Error in recalculateConceptScores. Check logs.");
+    return res.status(500).send("Error recalculating concept scores. Check logs.");
   }
 });
-
 
 
 
