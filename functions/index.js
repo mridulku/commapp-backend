@@ -1079,6 +1079,7 @@ exports.updateSubChaptersDemoOnUpdate = onDocumentUpdated(
 exports.extractConceptsOnFlag = onDocumentUpdated("subchapters_demo/{docId}", async (event) => {
   const beforeData = event.data.before?.data() || {};
   const afterData = event.data.after?.data() || {};
+  const bookId = afterData.bookId || null;
   const docId = event.params.docId;
 
   // oldVal => conceptExtractionRequested in "before"
@@ -1169,6 +1170,7 @@ Do not include extra commentary outside the JSON.
       for (const concept of concepts) {
         await db.collection("subchapterConcepts").add({
           subChapterId: docId,
+          bookId: bookId, // <-- Add the bookId here
           name: concept.name || "Untitled",
           summary: concept.summary || "",
           subPoints: concept.subPoints || [],
@@ -2858,6 +2860,7 @@ exports.onExamPDFUpload = onObjectFinalized(async (event) => {
     const metadata = object.metadata || {};
     const category = metadata.category || "unspecified";
     const userId = metadata.userId || "unknownUser";
+    const bookId = metadata.bookId || "unknown Book";
     const examName = metadata.examName || "Unknown Exam";
 
     // Only proceed if category = "examPaper"
@@ -2893,6 +2896,7 @@ exports.onExamPDFUpload = onObjectFinalized(async (event) => {
       rawText: fullText,
       category: "examPaper",
       userId,
+      bookId,
       examName,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
@@ -2921,7 +2925,7 @@ exports.parseExamPaperIntoQuestions = onDocumentCreated("examPdfExtracts/{docId}
 
     const data = docSnap.data() || {};
     const docId = event.params.docId;
-    const { category, rawText, userId, examName } = data;
+    const { category, rawText, userId, bookId, examName } = data;
 
     // Only proceed if category = "examPaper"
     if (category !== "examPaper") {
@@ -3025,6 +3029,7 @@ ${rawText}
       examPdfId: docId,
       userId,
       examName,
+      bookId,
       questions: parsedQuestions,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
@@ -3055,7 +3060,7 @@ exports.splitExamQuestionSets = onDocumentCreated("examQuestionSets/{setId}", as
 
     const setId = event.params.setId;
     const data = docSnap.data() || {};
-    const { userId, examPdfId, examName, questions } = data;
+    const { userId, bookId, examPdfId, examName, questions } = data;
 
     if (!questions || !Array.isArray(questions)) {
       logger.info(`No 'questions' array found in examQuestionSets docId=${setId}. Skipping.`);
@@ -3070,6 +3075,7 @@ exports.splitExamQuestionSets = onDocumentCreated("examQuestionSets/{setId}", as
       batch.set(newDocRef, {
         examPdfId,
         userId,
+        bookId,
         examName,
         questionNumber: qObj.questionNumber || "",
         questionText: qObj.questionText || "",
@@ -3112,6 +3118,7 @@ exports.onExamGuidelinesPDFUpload = onObjectFinalized(async (event) => {
     const metadata = object.metadata || {};
     const category = metadata.category || "unspecified";
     const userId = metadata.userId || "unknownUser";
+    const bookId = metadata.bookId || "unknownUser";
     const examTitle = metadata.examTitle || "UnnamedExamGuidelines";
 
     // 1) Check if category=examGuidelines
@@ -3145,6 +3152,7 @@ exports.onExamGuidelinesPDFUpload = onObjectFinalized(async (event) => {
       rawText: fullText,
       category: "examGuidelines",
       userId,
+      bookId,
       examTitle,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
@@ -3172,7 +3180,7 @@ exports.parseExamGuidelines = onDocumentCreated("examGuidelinesExtracts/{docId}"
 
     const data = docSnap.data() || {};
     const docId = event.params.docId;
-    const { category, rawText, userId, examTitle } = data;
+    const { category, rawText, userId, bookId, examTitle } = data;
 
     if (category !== "examGuidelines") {
       logger.info(`Doc ${docId} is not examGuidelines => skipping parseExamGuidelines.`);
@@ -3275,6 +3283,7 @@ ${rawText}
       guidelinesExtractId: docId, // link to the source doc
       userId,
       examTitle,
+      bookId,
       structuredGuidelines: parsedData,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
@@ -3282,5 +3291,492 @@ ${rawText}
     logger.info(`Parsed guidelines JSON stored => docId=${newRef.id}`);
   } catch (err) {
     logger.error("Error in parseExamGuidelines:", err);
+  }
+});
+
+
+
+function getOpenAiKey() {
+  // Option A: environment variable
+  const key = process.env.OPENAI_API_KEY;
+  // Option B: from firebase functions config => functions.config().openai.apikey
+  if (!key) {
+    logger.error("OPENAI_API_KEY not found in environment!");
+  }
+  return key;
+}
+
+/**
+ * mapQuestionsToConceptsHTTP (v2)
+ * --------------------------------
+ * HTTP endpoint you can call with ?bookId=xxx&userId=xxx
+ * 1) Gathers book structure from chapters_demo, subchapters_demo, subchapterConcepts
+ * 2) Gathers examQuestions for that bookId
+ * 3) Calls GPT: returns questionId -> conceptIds mapping
+ * 4) Stores in questionConceptMaps
+ */
+exports.mapQuestionsToConceptsHTTP = onRequest(async (req, res) => {
+  try {
+    const { bookId, userId } = req.query;
+    if (!bookId || !userId) {
+      res.status(400).send("Missing bookId or userId in query params.");
+      return;
+    }
+
+    logger.info(`mapQuestionsToConceptsHTTP => bookId=${bookId}, userId=${userId}`);
+
+    // 1) Fetch chapters, subchapters, concepts for this book
+    const chaptersSnap = await db
+      .collection("chapters_demo")
+      .where("bookId", "==", bookId)
+      .get();
+    const chapters = [];
+    chaptersSnap.forEach((doc) => {
+      chapters.push({ id: doc.id, ...doc.data() });
+    });
+
+    const subchaptersSnap = await db
+      .collection("subchapters_demo")
+      .where("bookId", "==", bookId)
+      .get();
+    const subchapters = [];
+    subchaptersSnap.forEach((doc) => {
+      subchapters.push({ id: doc.id, ...doc.data() });
+    });
+
+    const conceptsSnap = await db
+      .collection("subchapterConcepts")
+      .where("bookId", "==", bookId)
+      .get();
+    const concepts = [];
+    conceptsSnap.forEach((doc) => {
+      concepts.push({ id: doc.id, ...doc.data() });
+    });
+
+    // 2) Fetch questions in examQuestions for this bookId
+    const questionsSnap = await db
+      .collection("examQuestions")
+      .where("bookId", "==", bookId)
+      .get();
+    const questions = [];
+    questionsSnap.forEach((qDoc) => {
+      questions.push({ id: qDoc.id, ...qDoc.data() });
+    });
+
+    logger.info(
+      `Found ${chapters.length} chapters, ${subchapters.length} subchaps, `
+      + `${concepts.length} concepts, ${questions.length} questions.`
+    );
+
+    // 3) Build GPT prompt
+    const openAiKey = getOpenAiKey();
+    if (!openAiKey) {
+      return res.status(500).send("OPENAI_API_KEY not set in environment!");
+    }
+
+    const configuration = new Configuration({ apiKey: openAiKey });
+    const openai = new OpenAIApi(configuration);
+
+    // Summarize the book structure as text
+    let bookStructureText = "BOOK STRUCTURE:\n";
+    chapters.forEach((ch) => {
+      bookStructureText += `Chapter: ${ch.name || ch.id}\n`;
+      const subchOfChap = subchapters.filter((sc) => sc.chapterId === ch.id);
+      subchOfChap.forEach((sc) => {
+        bookStructureText += `  Subchapter: ${sc.name || sc.id}\n`;
+        const cpts = concepts.filter((c) => c.subChapterId === sc.id);
+        cpts.forEach((c) => {
+          bookStructureText += `    Concept: ${c.name}, conceptId=${c.id}\n`;
+        });
+      });
+    });
+
+    // Summarize questions
+    let questionText = "QUESTIONS:\n";
+    questions.forEach((q) => {
+      questionText += `QuestionID=${q.id}, text="${q.questionText}"\n`;
+    });
+
+    const promptText = `
+You are mapping questions to concepts.
+We have chapters/subchapters/concepts with IDs:
+${bookStructureText}
+
+We also have questions:
+${questionText}
+
+Return valid JSON ONLY, in this format:
+[
+  {
+    "questionId": "xyz",
+    "conceptIds": ["abc", "def"]
+  },
+  ...
+]
+If a question doesn't match any concept, use [] for conceptIds.
+No code fences or extra commentary!
+`.trim();
+
+    const completion = await openai.createChatCompletion({
+      model: "gpt-3.5-turbo", 
+      messages: [
+        { role: "system", content: "You are a structured data extraction assistant." },
+        { role: "user", content: promptText },
+      ],
+      temperature: 0.7,
+    });
+
+    let gptOutput = completion.data.choices[0].message.content.trim();
+    logger.info("mapQuestionsToConcepts => GPT output (first 200 chars):", gptOutput.slice(0,200), "...");
+
+    // Clean code fences
+    const cleanedOutput = gptOutput
+      .replace(/^```(\w+)?/, "")
+      .replace(/```$/, "")
+      .trim();
+
+    let parsedResult = [];
+    try {
+      parsedResult = JSON.parse(cleanedOutput);
+    } catch (err) {
+      logger.error("Error parsing GPT question->concept JSON:", err);
+      return res.status(500).send("Failed to parse GPT JSON output. Check logs.");
+    }
+
+    // 4) Store doc in "questionConceptMaps"
+    const mapDocRef = await db.collection("questionConceptMaps").add({
+      userId,
+      bookId,
+      rawMapping: parsedResult,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    logger.info(`mapQuestionsToConceptsHTTP => created docId=${mapDocRef.id} with ${parsedResult.length} items in rawMapping.`);
+    return res.status(200).send(`Mapping doc created => ${mapDocRef.id}`);
+  } catch (error) {
+    logger.error("Error in mapQuestionsToConceptsHTTP:", error);
+    return res.status(500).send("Error occurred. Check logs.");
+  }
+});
+
+/**
+ * onQuestionConceptMapCreated (v2 Firestore)
+ * ------------------------------------------
+ * Triggered when we create a doc in questionConceptMaps.
+ * We read rawMapping: an array of {questionId, conceptIds}.
+ * For each item, update the question doc -> concepts: [...]
+ * and each concept doc -> questionRefs: arrayUnion(questionId).
+ */
+exports.onQuestionConceptMapCreated = onDocumentCreated("questionConceptMaps/{docId}", async (event) => {
+  try {
+    const docSnap = event.data;
+    if (!docSnap) {
+      logger.info("No doc snapshot in onQuestionConceptMapCreated event.");
+      return;
+    }
+
+    const data = docSnap.data() || {};
+    const { rawMapping, bookId, userId } = data;
+    if (!rawMapping || !Array.isArray(rawMapping)) {
+      logger.info("No valid rawMapping array found => skipping updates.");
+      return;
+    }
+
+    logger.info(`onQuestionConceptMapCreated => bookId=${bookId}, mapping length=${rawMapping.length}`);
+
+    const batch = db.batch();
+
+    rawMapping.forEach((item) => {
+      const { questionId, conceptIds } = item;
+      if (!questionId || !Array.isArray(conceptIds)) return;
+
+      // 1) Update question doc in examQuestions => store concept IDs
+      const qRef = db.collection("examQuestions").doc(questionId);
+      batch.update(qRef, {
+        concepts: conceptIds,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      // 2) For each conceptId => arrayUnion the questionId
+      conceptIds.forEach((cId) => {
+        const cRef = db.collection("subchapterConcepts").doc(cId);
+        batch.set(
+          cRef,
+          {
+            questionRefs: admin.firestore.FieldValue.arrayUnion(questionId),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+      });
+    });
+
+    await batch.commit();
+    logger.info("onQuestionConceptMapCreated => successfully updated question + concept docs.");
+  } catch (err) {
+    logger.error("Error in onQuestionConceptMapCreated:", err);
+  }
+});
+
+/**
+ * recalculateConceptScores (v2)
+ * -----------------------------
+ * HTTP endpoint to re-scan all subchapterConcepts for a given bookId,
+ * computing examPresenceScore based on # of questionRefs and question marks.
+ * We also factor in the question's "marks" if you want to weight by that.
+ */
+exports.recalculateConceptScores = onRequest(async (req, res) => {
+  try {
+    const { bookId } = req.query;
+    if (!bookId) {
+      return res.status(400).send("Missing bookId.");
+    }
+
+    logger.info(`recalculateConceptScores => bookId=${bookId}`);
+
+    // 1) We'll fetch subchapterConcepts for that book
+    const cSnap = await db
+      .collection("subchapterConcepts")
+      .where("bookId", "==", bookId)
+      .get();
+
+    // 2) We'll also fetch the examQuestions to see their marks
+    const qSnap = await db
+      .collection("examQuestions")
+      .where("bookId", "==", bookId)
+      .get();
+    const questionMap = {}; // questionId -> { marks, etc. }
+    qSnap.forEach((qDoc) => {
+      questionMap[qDoc.id] = qDoc.data();
+    });
+
+    let batch = db.batch();
+    let opsCount = 0;
+
+    cSnap.forEach((doc) => {
+      const cData = doc.data() || {};
+      const questionRefs = cData.questionRefs || [];
+      // We'll sum the marks from each question reference for a final "examPresenceScore"
+      let totalMarks = 0;
+      questionRefs.forEach((qId) => {
+        const qObj = questionMap[qId] || {};
+        const qMarks = qObj.marks || 0;
+        totalMarks += qMarks; 
+      });
+
+      // If you want a simpler approach (just count of questionRefs), you can do:
+      // const examPresenceScore = questionRefs.length;
+      // But let's do totalMarks for a more weighted approach
+      const examPresenceScore = totalMarks;
+
+      // Update doc
+      const cRef = db.collection("subchapterConcepts").doc(doc.id);
+      batch.update(cRef, { examPresenceScore });
+      opsCount++;
+
+      if (opsCount >= 400) {
+        batch.commit();
+        batch = db.batch();
+        opsCount = 0;
+      }
+    });
+
+    if (opsCount > 0) {
+      await batch.commit();
+    }
+
+    logger.info("recalculateConceptScores => done. Weighted by total question marks.");
+    return res.status(200).send("Concept scores recalculated successfully!");
+  } catch (err) {
+    logger.error("Error in recalculateConceptScores:", err);
+    return res.status(500).send("Error in recalculateConceptScores. Check logs.");
+  }
+});
+
+
+
+
+
+/**
+ * mapGuidelinesToConceptScoresHTTP (v2)
+ * --------------------------------------
+ * An HTTP function called via e.g.
+ *   GET/POST ?bookId=xxx&guidelinesDocId=yyy
+ * 
+ * Steps:
+ *  1) Read the doc in `examGuidelinesExtracts` => get rawText
+ *  2) Gather all concepts for that `bookId`
+ *  3) Prompt GPT: "Here is the guidelines text + concept list => produce an array of { conceptId, presenceScore }"
+ *  4) Store that mapping in `guidelinesConceptMaps` => triggers next function
+ */
+
+
+
+
+exports.mapGuidelinesToConceptScores2 = onRequest(async (req, res) => {
+  try {
+    const { bookId, guidelinesDocId } = req.query;
+    if (!bookId || !guidelinesDocId) {
+      return res.status(400).send("Missing bookId or guidelinesDocId in query params.");
+    }
+
+    logger.info(`mapGuidelinesToConceptScoresHTTP => bookId=${bookId}, guidelinesDocId=${guidelinesDocId}`);
+
+    // 1) Read examGuidelinesExtracts/{guidelinesDocId} => rawText
+    const guidDoc = await db.collection("examGuidelinesExtracts").doc(guidelinesDocId).get();
+    if (!guidDoc.exists) {
+      return res.status(404).send("No examGuidelinesExtracts doc found for that guidelinesDocId.");
+    }
+    const guidData = guidDoc.data() || {};
+    const rawText = guidData.rawText || "";
+    if (!rawText) {
+      return res.status(400).send("No rawText found in that guidelines doc. Cannot proceed.");
+    }
+
+    // 2) Gather subchapterConcepts for the book => concept list
+    const conceptsSnap = await db
+      .collection("subchapterConcepts")
+      .where("bookId", "==", bookId)
+      .get();
+    const concepts = [];
+    conceptsSnap.forEach((doc) => {
+      concepts.push({ id: doc.id, ...doc.data() });
+    });
+
+    logger.info(`Found ${concepts.length} concepts for bookId=${bookId}.`);
+
+    // Build a text summary of concept IDs
+    let conceptListText = "Concept List:\n";
+    concepts.forEach((c) => {
+      conceptListText += `conceptName="${c.name}", conceptId="${c.id}"\n`;
+    });
+
+    // 3) Call GPT
+    const openAiKey = getOpenAiKey();
+    if (!openAiKey) {
+      return res.status(500).send("OPENAI_API_KEY not set in environment!");
+    }
+
+    const configuration = new Configuration({ apiKey: openAiKey });
+    const openai = new OpenAIApi(configuration);
+
+    const prompt = `
+We have an exam guidelines text and a list of concepts (with IDs).
+Please analyze the guidelines text, and for each conceptId, assign a numeric "presenceScore" from 0..100,
+reflecting how important or relevant that concept is according to the guidelines.
+
+Return valid JSON ONLY, in the form:
+[
+  {
+    "conceptId": "...",
+    "score": 0
+  },
+  ...
+]
+
+No extra commentary or code fences.
+
+Guidelines Text:
+${rawText}
+
+${conceptListText}
+`.trim();
+
+    const completion = await openai.createChatCompletion({
+      model: "gpt-3.5-turbo",
+      messages: [
+        { role: "system", content: "You are a structured data extraction assistant." },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.7,
+    });
+
+    let gptOutput = completion.data.choices[0].message.content.trim();
+    logger.info("mapGuidelinesToConceptScoresHTTP => GPT output (first 200 chars):", gptOutput.slice(0,200), "...");
+
+    // Clean code fences if present
+    const cleaned = gptOutput
+      .replace(/^```(\w+)?/, "")
+      .replace(/```$/, "")
+      .trim();
+
+    let parsedResult = [];
+    try {
+      parsedResult = JSON.parse(cleaned);
+    } catch (err) {
+      logger.error("Error parsing GPT guidelines->concept JSON:", err);
+      return res.status(500).send("Failed to parse GPT JSON. Check logs.");
+    }
+
+    // 5) Store in guidelinesConceptMaps => triggers next function
+    const mapDocRef = await db.collection("guidelinesConceptMaps").add({
+      bookId,
+      guidelinesDocId,
+      rawMapping: parsedResult,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    logger.info(`mapGuidelinesToConceptScoresHTTP => created doc in guidelinesConceptMaps => docId=${mapDocRef.id} with ${parsedResult.length} items.`);
+    return res.status(200).send(`Guidelines->Concept map doc created => ${mapDocRef.id}`);
+  } catch (error) {
+    logger.error("Error in mapGuidelinesToConceptScoresHTTP:", error);
+    return res.status(500).send("Error occurred. Check logs.");
+  }
+});
+
+/**
+ * onGuidelinesConceptMapCreated (v2)
+ * ----------------------------------
+ * Firestore trigger for docs in `guidelinesConceptMaps`.
+ * We read `rawMapping`: an array of { conceptId, score } from GPT.
+ * Then we update each concept doc => `guidelinePresenceScore = score`.
+ */
+exports.onGuidelinesConceptMapCreated = onDocumentCreated("guidelinesConceptMaps/{docId}", async (event) => {
+  try {
+    const docSnap = event.data;
+    if (!docSnap) {
+      logger.info("No doc snapshot in onGuidelinesConceptMapCreated event.");
+      return;
+    }
+
+    const data = docSnap.data() || {};
+    const { rawMapping, bookId, guidelinesDocId } = data;
+    if (!Array.isArray(rawMapping)) {
+      logger.info("No valid array found in rawMapping => skipping.");
+      return;
+    }
+
+    logger.info(`onGuidelinesConceptMapCreated => docId=${event.params.docId}, length=${rawMapping.length}`);
+
+    // We'll do a batch update to subchapterConcepts
+    const batch = db.batch();
+    let opsCount = 0;
+
+    rawMapping.forEach((item) => {
+      const { conceptId, score } = item;
+      if (!conceptId || typeof score !== "number") return;
+
+      const cRef = db.collection("subchapterConcepts").doc(conceptId);
+      // We'll store `guidelinePresenceScore: score`
+      batch.update(cRef, {
+        guidelinePresenceScore: score,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      opsCount++;
+
+      // if ops get too big, commit
+      if (opsCount >= 400) {
+        batch.commit();
+        opsCount = 0;
+      }
+    });
+
+    if (opsCount > 0) {
+      await batch.commit();
+    }
+
+    logger.info("onGuidelinesConceptMapCreated => updated guidelinePresenceScore for all concepts in rawMapping.");
+  } catch (err) {
+    logger.error("Error in onGuidelinesConceptMapCreated:", err);
   }
 });
