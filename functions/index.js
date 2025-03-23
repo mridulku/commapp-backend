@@ -3535,29 +3535,32 @@ exports.recalculateConceptScores = onRequest(async (req, res) => {
 
     logger.info(`recalculateConceptScores => bookId=${bookId}`);
 
-    // 1) We'll fetch subchapterConcepts for that book
+    // 1) Fetch subchapterConcepts for this book
     const cSnap = await db
       .collection("subchapterConcepts")
       .where("bookId", "==", bookId)
       .get();
 
-    // 2) We'll also fetch the examQuestions to see their marks & their concept arrays
+    // 2) Fetch examQuestions for this book => build questionMap
     const qSnap = await db
       .collection("examQuestions")
       .where("bookId", "==", bookId)
       .get();
 
-    // Build a map questionId -> questionObj
-    // questionObj should contain .marks and .concepts array
     const questionMap = {};
     qSnap.forEach((qDoc) => {
-      questionMap[qDoc.id] = qDoc.data();
+      questionMap[qDoc.id] = qDoc.data();  // includes .marks, .concepts, etc.
     });
 
-    let batch = db.batch();
-    let opsCount = 0;
+    // We'll store partial sums in memory first
+    // conceptScores[conceptDoc.id] = numeric partialSum
+    const conceptScores = {};
 
-    // For each concept doc, sum up partial marks from each questionRef
+    cSnap.forEach((conceptDoc) => {
+      conceptScores[conceptDoc.id] = 0; // initialize to 0
+    });
+
+    // First pass: sum partial marks for each concept
     cSnap.forEach((conceptDoc) => {
       const conceptData = conceptDoc.data() || {};
       const questionRefs = conceptData.questionRefs || [];
@@ -3567,7 +3570,7 @@ exports.recalculateConceptScores = onRequest(async (req, res) => {
       questionRefs.forEach((qId) => {
         const qObj = questionMap[qId] || {};
         const qMarks = qObj.marks || 0;
-        const qConcepts = qObj.concepts || [];  // The array of conceptIds that question references
+        const qConcepts = qObj.concepts || []; // The array of conceptIds that question references
 
         if (qConcepts.length > 0) {
           // Dividing the question's total marks among all concepts it references
@@ -3579,28 +3582,47 @@ exports.recalculateConceptScores = onRequest(async (req, res) => {
         }
       });
 
-      // Now we have a partial sum for each concept
-      const examPresenceScore = totalMarks;
+      // Store this raw sum in conceptScores
+      conceptScores[conceptDoc.id] = totalMarks;
+    });
 
-      // Update the concept doc
-      const ref = db.collection("subchapterConcepts").doc(conceptDoc.id);
-      batch.update(ref, { examPresenceScore });
+    // Second pass: sum ALL partial scores => normalize to 0..100
+    let grandTotal = 0;
+    Object.values(conceptScores).forEach((val) => {
+      grandTotal += val;
+    });
+
+    logger.info(`Total partial exam score across all concepts => ${grandTotal}`);
+
+    // We'll do a final batch update
+    let batch = db.batch();
+    let opsCount = 0;
+
+    // Normalize each concept's score
+    for (const cid of Object.keys(conceptScores)) {
+      let rawScore = conceptScores[cid];
+      let normalized = 0;
+      if (grandTotal > 0) {
+        normalized = (rawScore / grandTotal) * 100;
+      }
+
+      const ref = db.collection("subchapterConcepts").doc(cid);
+      batch.update(ref, { examPresenceScore: normalized });
       opsCount++;
 
-      // If we approach batch limit
       if (opsCount >= 400) {
-        batch.commit();
+        await batch.commit();
         batch = db.batch();
         opsCount = 0;
       }
-    });
+    }
 
     if (opsCount > 0) {
       await batch.commit();
     }
 
-    logger.info("recalculateConceptScores => done (divided question marks among concepts).");
-    return res.status(200).send("Concept scores recalculated (shared marks)!");
+    logger.info("recalculateConceptScores => done with normalization to 0..100.");
+    return res.status(200).send("Concept scores recalculated & normalized (0..100)!");
   } catch (err) {
     logger.error("Error in recalculateConceptScores:", err);
     return res.status(500).send("Error recalculating concept scores. Check logs.");
@@ -3744,6 +3766,9 @@ ${conceptListText}
  * We read `rawMapping`: an array of { conceptId, score } from GPT.
  * Then we update each concept doc => `guidelinePresenceScore = score`.
  */
+
+
+
 exports.onGuidelinesConceptMapCreated = onDocumentCreated("guidelinesConceptMaps/{docId}", async (event) => {
   try {
     const docSnap = event.data;
@@ -3761,7 +3786,17 @@ exports.onGuidelinesConceptMapCreated = onDocumentCreated("guidelinesConceptMaps
 
     logger.info(`onGuidelinesConceptMapCreated => docId=${event.params.docId}, length=${rawMapping.length}`);
 
-    // We'll do a batch update to subchapterConcepts
+    // 1) First, sum all raw scores
+    let total = 0;
+    rawMapping.forEach((item) => {
+      if (item && typeof item.score === "number") {
+        total += item.score;
+      }
+    });
+
+    logger.info(`Sum of all raw GPT scores => ${total}`);
+
+    // 2) We'll do a second pass, compute fraction => store in subchapterConcepts
     const batch = db.batch();
     let opsCount = 0;
 
@@ -3769,15 +3804,22 @@ exports.onGuidelinesConceptMapCreated = onDocumentCreated("guidelinesConceptMaps
       const { conceptId, score } = item;
       if (!conceptId || typeof score !== "number") return;
 
+      // fraction = (score / total) * 100 if total > 0, else 0
+      let fraction = 0;
+      if (total > 0) {
+        fraction = (score / total) * 100;
+      }
+
       const cRef = db.collection("subchapterConcepts").doc(conceptId);
-      // We'll store `guidelinePresenceScore: score`
+
+      // We'll store guidelinePresenceScore as the normalized fraction
       batch.update(cRef, {
-        guidelinePresenceScore: score,
+        guidelinePresenceScore: fraction,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
       opsCount++;
 
-      // if ops get too big, commit
+      // if ops get too big, commit partial batch
       if (opsCount >= 400) {
         batch.commit();
         opsCount = 0;
@@ -3788,7 +3830,7 @@ exports.onGuidelinesConceptMapCreated = onDocumentCreated("guidelinesConceptMaps
       await batch.commit();
     }
 
-    logger.info("onGuidelinesConceptMapCreated => updated guidelinePresenceScore for all concepts in rawMapping.");
+    logger.info("onGuidelinesConceptMapCreated => normalized & updated guidelinePresenceScore for all concepts.");
   } catch (err) {
     logger.error("Error in onGuidelinesConceptMapCreated:", err);
   }
