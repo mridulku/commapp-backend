@@ -3542,6 +3542,79 @@ app.post("/api/submitReading", async (req, res) => {
 });
 
 
+
+
+app.post("/api/incrementTime", async (req, res) => {
+  try {
+    const { userId, planId, increment } = req.body;
+    if (!userId || !planId || typeof increment !== "number") {
+      return res.status(400).json({ error: "Missing or invalid fields" });
+    }
+
+    // For daily records, build docId with today's date => "userId_planId_YYYY-MM-DD"
+    const dateStr = new Date().toISOString().substring(0, 10);
+    const docId = `${userId}_${planId}_${dateStr}`;
+    const docRef = db.collection("dailyTimeRecords").doc(docId);
+
+    let newTotal;
+    await db.runTransaction(async (t) => {
+      const snap = await t.get(docRef);
+      const current = snap.exists ? snap.data().totalSeconds || 0 : 0;
+      newTotal = current + increment;
+
+      // Update the parent doc with new total
+      t.set(docRef, {
+        userId,
+        planId,
+        dateStr,
+        totalSeconds: newTotal,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+    });
+
+    // Also log the increment in a sub-collection
+    const incrementsRef = docRef.collection("increments");
+    await incrementsRef.add({
+      increment,
+      newTotal,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.json({ newTotalSeconds: newTotal });
+  } catch (err) {
+    console.error("Error in incrementTime:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
+// GET /api/dailyTime?userId=abc&planId=xyz
+// returns { totalSeconds: number }
+
+app.get("/api/dailyTime", async (req, res) => {
+  try {
+    const { userId, planId } = req.query;
+    if (!userId || !planId) {
+      return res.status(400).json({ error: "Missing userId or planId" });
+    }
+
+    // docId => e.g. "abc_xyz_2023-08-05"
+    const dateStr = new Date().toISOString().substring(0, 10);
+    const docId = `${userId}_${planId}_${dateStr}`;
+    const docRef = db.collection("dailyTimeRecords").doc(docId);
+
+    const docSnap = await docRef.get();
+    const totalSeconds = docSnap.exists ? (docSnap.data().totalSeconds || 0) : 0;
+
+    res.json({ totalSeconds });
+  } catch (err) {
+    console.error("Error in /api/dailyTime:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
