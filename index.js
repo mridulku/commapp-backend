@@ -3615,6 +3615,69 @@ app.get("/api/dailyTime", async (req, res) => {
 
 
 
+
+// index.js partial (server)
+app.get("/api/getReadingTime", async (req, res) => {
+  try {
+    const { userId, planId, subChapterId } = req.query;
+    if (!userId || !planId || !subChapterId) {
+      return res.status(400).json({ error: "Missing userId, planId, or subChapterId" });
+    }
+    const dateStr = new Date().toISOString().substring(0, 10);
+    const docId = `${userId}_${planId}_${subChapterId}_${dateStr}`;
+    const docRef = db.collection("readingSubActivity").doc(docId);
+
+    const snap = await docRef.get();
+    let totalSeconds = 0;
+    if (snap.exists) {
+      totalSeconds = snap.data().totalSeconds || 0;
+    }
+    res.json({ totalSeconds });
+  } catch (err) {
+    console.error("Error in /api/getReadingTime:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.post("/api/incrementReadingTime", async (req, res) => {
+  try {
+    const { userId, planId, subChapterId, increment } = req.body;
+    if (!userId || !planId || !subChapterId || typeof increment !== "number") {
+      return res.status(400).json({ error: "Missing or invalid fields" });
+    }
+
+    const dateStr = new Date().toISOString().substring(0, 10);
+    const docId = `${userId}_${planId}_${subChapterId}_${dateStr}`;
+    const docRef = db.collection("readingSubActivity").doc(docId);
+
+    let newTotal;
+    await db.runTransaction(async (t) => {
+      const snap = await t.get(docRef);
+      const current = snap.exists ? snap.data().totalSeconds || 0 : 0;
+      newTotal = current + increment;
+
+      t.set(
+        docRef,
+        {
+          userId,
+          planId,
+          subChapterId,
+          dateStr,
+          totalSeconds: newTotal,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+    });
+
+    res.json({ newTotalSeconds: newTotal });
+  } catch (err) {
+    console.error("Error in incrementReadingTime:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
