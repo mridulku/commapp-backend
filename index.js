@@ -3678,6 +3678,166 @@ app.post("/api/incrementReadingTime", async (req, res) => {
 });
 
 
+// Example: QuizTime routes
+// GET /api/getQuizTime => read doc from "quizTimeSubActivity" collection
+// POST /api/incrementQuizTime => increment doc total
+
+app.get("/api/getQuizTime", async (req, res) => {
+  try {
+    const { docId } = req.query;
+    if (!docId) {
+      return res.status(400).json({ error: "Missing docId" });
+    }
+
+    const docRef = db.collection("quizTimeSubActivity").doc(docId);
+    const snap = await docRef.get();
+    let totalSeconds = 0;
+    if (snap.exists) {
+      totalSeconds = snap.data().totalSeconds || 0;
+    }
+
+    res.json({ totalSeconds });
+  } catch (err) {
+    console.error("Error in /api/getQuizTime:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
+// In your Express server code:
+// In your Express server code:
+app.post("/api/incrementQuizTime", async (req, res) => {
+  try {
+    const {
+      docId,
+      increment,
+      userId,
+      planId,
+      subChapterId,
+      quizStage,
+      dateStr,
+      attemptNumber,  // <-- NEW
+    } = req.body;
+
+    // Validate
+    if (!docId || typeof increment !== "number") {
+      return res
+        .status(400)
+        .json({ error: "Missing or invalid docId/increment" });
+    }
+    if (!userId || !planId) {
+      return res.status(400).json({ error: "Missing userId or planId" });
+    }
+
+    const docRef = db.collection("quizTimeSubActivity").doc(docId);
+
+    let newTotal;
+    await db.runTransaction(async (t) => {
+      const snap = await t.get(docRef);
+      const current = snap.exists ? snap.data().totalSeconds || 0 : 0;
+      newTotal = current + increment;
+
+      // Merge in all fields for normal Firestore queries
+      t.set(
+        docRef,
+        {
+          userId,
+          planId,
+          subChapterId: subChapterId || "",
+          quizStage: quizStage || "",
+          dateStr: dateStr || "",
+          attemptNumber: attemptNumber || null, // <-- store attemptNumber
+          totalSeconds: newTotal,
+          updatedAt: new Date(),
+        },
+        { merge: true }
+      );
+    });
+
+    res.json({ newTotalSeconds: newTotal });
+  } catch (err) {
+    console.error("Error in /api/incrementQuizTime:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Example: RevisionTime routes
+// GET /api/getReviseTime => read doc from "reviseTimeSubActivity" collection
+// POST /api/incrementReviseTime => increment doc total
+
+app.get("/api/getReviseTime", async (req, res) => {
+  try {
+    const { docId } = req.query;
+    if (!docId) {
+      return res.status(400).json({ error: "Missing docId" });
+    }
+
+    const docRef = db.collection("reviseTimeSubActivity").doc(docId);
+    const snap = await docRef.get();
+    let totalSeconds = 0;
+    if (snap.exists) {
+      totalSeconds = snap.data().totalSeconds || 0;
+    }
+
+    res.json({ totalSeconds });
+  } catch (err) {
+    console.error("Error in /api/getReviseTime:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// In your Express server code:
+// In your Express server code:
+app.post("/api/incrementReviseTime", async (req, res) => {
+  try {
+    const {
+      docId,
+      increment,
+      userId,
+      planId,
+      subChapterId,
+      quizStage,
+      dateStr,
+      revisionNumber // <-- NEW
+    } = req.body;
+
+    // Validate
+    if (!docId || typeof increment !== "number") {
+      return res.status(400).json({ error: "Missing or invalid docId/increment" });
+    }
+    if (!userId || !planId) {
+      return res.status(400).json({ error: "Missing userId or planId" });
+    }
+
+    const docRef = db.collection("reviseTimeSubActivity").doc(docId);
+
+    let newTotal;
+    await db.runTransaction(async (t) => {
+      const snap = await t.get(docRef);
+      const current = snap.exists ? snap.data().totalSeconds || 0 : 0;
+      newTotal = current + increment;
+
+      // Merge in all fields (including revisionNumber)
+      t.set(docRef, {
+        userId,
+        planId,
+        subChapterId: subChapterId || "",
+        quizStage: quizStage || "",
+        dateStr: dateStr || "",
+        revisionNumber: revisionNumber || 1, // Store attempt # for revision
+        totalSeconds: newTotal,
+        updatedAt: new Date()
+      }, { merge: true });
+    });
+
+    res.json({ newTotalSeconds: newTotal });
+  } catch (err) {
+    console.error("Error in /api/incrementReviseTime:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
