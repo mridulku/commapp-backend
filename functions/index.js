@@ -1968,37 +1968,6 @@ function sortByNameWithNumericAware(items) {
 
 
 
-function getAlwaysAllActivities(subchapter, wpm) {
-  const wordCount = subchapter.wordCount || 0;
-  const readTime = wordCount > 0 ? Math.ceil(wordCount / wpm) : 0;
-
-  return [
-    {
-      type: "READ",
-      timeNeeded: readTime,
-      bookId: subchapter.bookId,
-      chapterId: subchapter.chapterId,
-      subChapterId: subchapter.id,
-      subChapterName: subchapter.name || "",
-    },
-    {
-      type: "QUIZ",
-      timeNeeded: 1,
-      bookId: subchapter.bookId,
-      chapterId: subchapter.chapterId,
-      subChapterId: subchapter.id,
-      subChapterName: subchapter.name || "",
-    },
-    {
-      type: "REVISE",
-      timeNeeded: 1,
-      bookId: subchapter.bookId,
-      chapterId: subchapter.chapterId,
-      subChapterId: subchapter.id,
-      subChapterName: subchapter.name || "",
-    },
-  ];
-}
 
 
 
@@ -2290,113 +2259,11 @@ function getDaysBetween(d1, d2) {
 
 
 
-function mapPlanTypeToStages(planType) {
-  // planType might be "none-basic", "some-moderate", "strong-advanced", etc.
-  switch (planType) {
-    // ----- none + (basic|moderate|advanced) -----
-    case "none-basic":
-      return { startStage: "remember", finalStage: "understand" };
-    case "none-moderate":
-      return { startStage: "remember", finalStage: "apply" };
-    case "none-advanced":
-      return { startStage: "remember", finalStage: "analyze" };
-
-    // ----- some + (basic|moderate|advanced) -----
-    case "some-basic":
-      // user claims partial knowledge => start at "understand"
-      // goal is "basic" => final => "understand"
-      return { startStage: "understand", finalStage: "understand" };
-    case "some-moderate":
-      return { startStage: "understand", finalStage: "apply" };
-    case "some-advanced":
-      return { startStage: "understand", finalStage: "analyze" };
-
-    // ----- strong + (basic|moderate|advanced) -----
-    case "strong-basic":
-      // user claims strong knowledge => start at "apply"
-      // for "basic," final is "understand," but that might not make sense 
-      // if "apply" is actually a higher stage than "understand."
-      // If you want to skip or invert that logic, adjust accordingly.
-      // For example, you might do start="apply", final="apply" if "basic" is truly lower
-      return { startStage: "apply", finalStage: "apply" };
-
-    case "strong-moderate":
-      return { startStage: "apply", finalStage: "apply" };
-    case "strong-advanced":
-      return { startStage: "apply", finalStage: "analyze" };
-
-    // fallback
-    default:
-      // If you have an unrecognized planType, 
-      // just assume from "remember" to "analyze" as a catch-all
-      return { startStage: "remember", finalStage: "analyze" };
-  }
-}
-
-// Stage helpers
-function stageToNumber(s) {
-  switch (s) {
-    case "none": return 0;
-    case "remember": return 1;
-    case "understand": return 2;
-    case "apply": return 3;
-    case "analyze": return 4;
-    default: return 0;
-  }
-}
-function numberToStage(n) {
-  switch (n) {
-    case 1: return "remember";
-    case 2: return "understand";
-    case 3: return "apply";
-    case 4: return "analyze";
-    default: return "none";
-  }
-}
 
 
-function getActivitiesForSub2(sub, {
-  userCurrentStage,   // e.g. "none"|"remember"|"understand"|"apply"|"analyze"
-  startStage,
-  finalStage,
-  wpm,
-  quizTime = 5
-}) {
-  const stageIndex = stageToNumber(userCurrentStage);
-  const startIndex = stageToNumber(startStage);
-  const finalIndex = stageToNumber(finalStage);
 
-  // If user is beyond final => no tasks
-  if (stageIndex >= finalIndex) {
-    return [];
-  }
 
-  const tasks = [];
 
-  // A) If user is behind "remember", add READ
-  if (stageIndex < 1 && startIndex <= 1) {
-    // reading time logic
-    const readTime = sub.wordCount 
-      ? Math.ceil(sub.wordCount / wpm)
-      : 5;
-    tasks.push({
-      type: "READ",
-      timeNeeded: readTime
-    });
-  }
-
-  // B) For each stage from max(stageIndex+1, startIndex) up to finalIndex => QUIZ only
-  let currentNeededStart = Math.max(stageIndex + 1, startIndex);
-  for (let st = currentNeededStart; st <= finalIndex; st++) {
-    tasks.push({
-      type: "QUIZ",
-      quizStage: numberToStage(st),
-      timeNeeded: quizTime
-    });
-  }
-
-  return tasks;
-}
 
 
 
