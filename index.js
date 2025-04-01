@@ -3838,6 +3838,110 @@ app.post("/api/incrementReviseTime", async (req, res) => {
 });
 
 
+app.get("/api/cumulativeReadingTime", async (req, res) => {
+  try {
+    const { userId, planId, subChapterId } = req.query;
+
+    // Basic validation
+    if (!userId || !planId || !subChapterId) {
+      return res.status(400).json({
+        error: "Missing userId, planId, or subChapterId",
+      });
+    }
+
+    // Firestore query => all docs in readingSubActivity that match
+    const colRef = db.collection("readingSubActivity");
+    const q = colRef
+      .where("userId", "==", userId)
+      .where("planId", "==", planId)
+      .where("subChapterId", "==", subChapterId);
+
+    const snap = await q.get();
+
+    // Sum over all matching docs
+    let totalSeconds = 0;
+    snap.forEach((docSnap) => {
+      const data = docSnap.data();
+      totalSeconds += data.totalSeconds || 0;
+    });
+
+    res.json({ totalSeconds });
+  } catch (err) {
+    console.error("Error in /api/cumulativeReadingTime:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
+app.get("/api/cumulativeQuizTime", async (req, res) => {
+  try {
+    const { userId, planId, subChapterId, quizStage } = req.query;
+
+    // Basic validation
+    if (!userId || !planId || !subChapterId || !quizStage) {
+      return res.status(400).json({
+        error: "Missing userId, planId, subChapterId, or quizStage",
+      });
+    }
+
+    // Query => quizTimeSubActivity
+    const colRef = db.collection("quizTimeSubActivity");
+    const q = colRef
+      .where("userId", "==", userId)
+      .where("planId", "==", planId)
+      .where("subChapterId", "==", subChapterId)
+      .where("quizStage", "==", quizStage); // must match case-sensitively
+
+    const snap = await q.get();
+
+    let totalSeconds = 0;
+    snap.forEach((docSnap) => {
+      const data = docSnap.data();
+      totalSeconds += data.totalSeconds || 0;
+    });
+
+    res.json({ totalSeconds });
+  } catch (err) {
+    console.error("Error in /api/cumulativeQuizTime:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
+app.get("/api/cumulativeReviseTime", async (req, res) => {
+  try {
+    const { userId, planId, subChapterId, quizStage } = req.query;
+
+    if (!userId || !planId || !subChapterId || !quizStage) {
+      return res.status(400).json({
+        error: "Missing userId, planId, subChapterId, or quizStage",
+      });
+    }
+
+    // Query => reviseTimeSubActivity
+    const colRef = db.collection("reviseTimeSubActivity");
+    const q = colRef
+      .where("userId", "==", userId)
+      .where("planId", "==", planId)
+      .where("subChapterId", "==", subChapterId)
+      .where("quizStage", "==", quizStage);
+
+    const snap = await q.get();
+
+    let totalSeconds = 0;
+    snap.forEach((docSnap) => {
+      const data = docSnap.data();
+      totalSeconds += data.totalSeconds || 0;
+    });
+
+    res.json({ totalSeconds });
+  } catch (err) {
+    console.error("Error in /api/cumulativeReviseTime:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);

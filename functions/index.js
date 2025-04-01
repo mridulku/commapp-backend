@@ -1417,10 +1417,10 @@ exports.cloneToeflBooksOnUserCreate = onDocumentCreated(
     logger.info(`User created => ${userId}`);
 
     const standardBookIds = [
-      "NwNZ8WWCz54Y4BeCli0c",
-      "fuyAbhDo3GXLbtEdZ9jj",
-      "5UWQEvQet8GgkZmjEwAO",
-      "pFAfUSWtwipFZG2RStKg",
+      "1z4qCTiEWZP7DgDAUKCA",
+      "1z4qCTiEWZP7DgDAUKCA",
+      "1z4qCTiEWZP7DgDAUKCA",
+      "1z4qCTiEWZP7DgDAUKCA",
     ];
 
     const cloneFunctionURL =
@@ -2266,7 +2266,7 @@ function getDaysBetween(d1, d2) {
 
 
 
-
+/*
 
 exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
   res.set("Access-Control-Allow-Origin", "*");
@@ -2277,9 +2277,12 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     return res.status(204).send("");
   }
 
-  // ------------------------
+  // Array to hold each step of the verbose log
+  let logDetails = [];
+
+  // ------------------------------------------------
   // A) Basic Input
-  // ------------------------
+  // ------------------------------------------------
   try {
     const userId = req.query.userId || req.body.userId;
     if (!userId) {
@@ -2302,13 +2305,11 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     let defaultMaxDayCount = getDaysBetween(today, targetDate);
     if (defaultMaxDayCount < 0) defaultMaxDayCount = 0;
 
-    // ------------------------
+    // ------------------------------------------------
     // B) Optional overrides
-    // ------------------------
-    const maxDaysOverride =
-      req.body.maxDays !== undefined ? Number(req.body.maxDays) : null;
-    const wpmOverride =
-      req.body.wpm !== undefined ? Number(req.body.wpm) : null;
+    // ------------------------------------------------
+    const maxDaysOverride = req.body.maxDays !== undefined ? Number(req.body.maxDays) : null;
+    const wpmOverride = req.body.wpm !== undefined ? Number(req.body.wpm) : null;
     const dailyReadingTimeOverride =
       req.body.dailyReadingTime !== undefined
         ? Number(req.body.dailyReadingTime)
@@ -2321,6 +2322,7 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     // planType => e.g. "none-basic", "some-advanced", etc.
     const level = req.body.planType || "none-basic";
 
+    // Book/chapter/sub-chapter selection
     const selectedBooks = Array.isArray(req.body.selectedBooks)
       ? req.body.selectedBooks
       : null;
@@ -2332,9 +2334,23 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
       : null;
     const singleBookIdFromBody = req.body.bookId || "";
 
-    // ------------------------
+    // Log the initial inputs
+    logDetails.push(`User ID: ${userId}`);
+    logDetails.push(`Target Date: ${targetDateStr}`);
+    logDetails.push(`Exam ID: ${examId}`);
+    logDetails.push(`Selected plan type (level): ${level}`);
+    logDetails.push(
+      `Overrides => maxDays: ${maxDaysOverride}, wpm: ${wpmOverride}, dailyReadingTime: ${dailyReadingTimeOverride}, quizTime: ${quizTimeOverride}`
+    );
+    logDetails.push(
+      `Selected books: ${JSON.stringify(selectedBooks || [])}, selectedChapters: ${JSON.stringify(
+        selectedChapters || []
+      )}, selectedSubChapters: ${JSON.stringify(selectedSubChapters || [])}`
+    );
+
+    // ------------------------------------------------
     // C) Fetch Persona
-    // ------------------------
+    // ------------------------------------------------
     const db = admin.firestore();
     const personaSnap = await db
       .collection("learnerPersonas")
@@ -2353,21 +2369,27 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
         .json({ error: "Persona doc must have 'wpm' and 'dailyReadingTime'." });
     }
 
+    logDetails.push(
+      `Fetched learner persona => wpm: ${personaData.wpm}, dailyReadingTime: ${personaData.dailyReadingTime}`
+    );
+
     const finalWpm = wpmOverride || personaData.wpm;
     const finalDailyReadingTime =
       dailyReadingTimeOverride || personaData.dailyReadingTime;
     let maxDayCount =
       maxDaysOverride !== null ? maxDaysOverride : defaultMaxDayCount;
 
-    // ------------------------
+    logDetails.push(
+      `Final WPM used: ${finalWpm}, final dailyReadingTime used: ${finalDailyReadingTime}, maxDayCount: ${maxDayCount}`
+    );
+
+    // ------------------------------------------------
     // D) Fetch exam config
-    // ------------------------
-    // If examId is "general" or empty => we'll try examConfigs/general
+    // ------------------------------------------------
     const examDocRef = db.collection("examConfigs").doc(examId);
     const examDocSnap = await examDocRef.get();
 
     if (!examDocSnap.exists) {
-      // If they asked for something other than "general" but it doesn't exist, error
       if (examId !== "general") {
         return res
           .status(400)
@@ -2383,8 +2405,16 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     if (!examConfig.stages || !examConfig.planTypes) {
       return res
         .status(400)
-        .json({ error: `Exam config doc for '${examId}' is missing 'stages' or 'planTypes'.` });
+        .json({
+          error: `Exam config doc for '${examId}' is missing 'stages' or 'planTypes'.`,
+        });
     }
+
+    logDetails.push(
+      `Exam config loaded: stages => ${JSON.stringify(
+        examConfig.stages
+      )}, planTypes keys => ${Object.keys(examConfig.planTypes).join(", ")}`
+    );
 
     // Helper to convert stage string -> numeric index
     function stageToNumber(stageStr) {
@@ -2415,13 +2445,10 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     }
 
     // This replaces the old getActivitiesForSub2() function
-    function getActivitiesForSub2(sub, {
-      userCurrentStage, // e.g. "none"|"remember"|"understand"|"apply"|"analyze"
-      startStage,
-      finalStage,
-      wpm,
-      quizTime = 5
-    }) {
+    function getActivitiesForSub2(
+      sub,
+      { userCurrentStage, startStage, finalStage, wpm, quizTime = 5 }
+    ) {
       const stageIndex = stageToNumber(userCurrentStage);
       const startIndex = stageToNumber(startStage);
       const finalIndex = stageToNumber(finalStage);
@@ -2440,12 +2467,10 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
         // If user is behind the "remember" stage, and the plan includes it
         if (stageIndex < rememberIndex && startIndex <= rememberIndex) {
           // reading time logic
-          const readTime = sub.wordCount
-            ? Math.ceil(sub.wordCount / wpm)
-            : 5;
+          const readTime = sub.wordCount ? Math.ceil(sub.wordCount / wpm) : 5;
           tasks.push({
             type: "READ",
-            timeNeeded: readTime
+            timeNeeded: readTime,
           });
         }
       }
@@ -2456,16 +2481,16 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
         tasks.push({
           type: "QUIZ",
           quizStage: numberToStage(st),
-          timeNeeded: quizTime
+          timeNeeded: quizTime,
         });
       }
 
       return tasks;
     }
 
-    // ------------------------
+    // ------------------------------------------------
     // E) Fetch Books
-    // ------------------------
+    // ------------------------------------------------
     let arrayOfBookIds = [];
     if (selectedBooks && selectedBooks.length > 0) {
       arrayOfBookIds = selectedBooks;
@@ -2479,8 +2504,12 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
         .collection("books_demo")
         .where(admin.firestore.FieldPath.documentId(), "in", arrayOfBookIds)
         .get();
+      logDetails.push(
+        `Fetching books by specific IDs => ${JSON.stringify(arrayOfBookIds)}`
+      );
     } else {
       booksSnap = await db.collection("books_demo").get();
+      logDetails.push(`Fetching all books because no specific Book IDs given.`);
     }
 
     const booksData = [];
@@ -2494,11 +2523,7 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
         chaptersSnap = await db
           .collection("chapters_demo")
           .where("bookId", "==", bookId)
-          .where(
-            admin.firestore.FieldPath.documentId(),
-            "in",
-            selectedChapters
-          )
+          .where(admin.firestore.FieldPath.documentId(), "in", selectedChapters)
           .get();
       } else {
         chaptersSnap = await db
@@ -2544,10 +2569,33 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
       booksData.push(book);
     }
 
-    // ------------------------
+    // Log how many books and their chapters were fetched
+    logDetails.push(
+      `Total books fetched: ${booksData.length}. Now extracting chapters & subchapters.`
+    );
+    for (const b of booksData) {
+      logDetails.push(
+        `Book "${b.name || b.id}" has ${b.chapters ? b.chapters.length : 0} chapters.`
+      );
+      if (b.chapters) {
+        for (const c of b.chapters) {
+          logDetails.push(
+            `-- Chapter "${c.name || c.id}" has ${
+              c.subchapters ? c.subchapters.length : 0
+            } subchapters.`
+          );
+        }
+      }
+    }
+
+    // ------------------------------------------------
     // H) Build array of tasks
-    // ------------------------
+    // ------------------------------------------------
     const { startStage, finalStage } = getPlanTypeStages(level);
+    logDetails.push(
+      `Plan type stages derived: startStage="${startStage}", finalStage="${finalStage}".`
+    );
+
     const allActivities = [];
 
     for (const book of booksData) {
@@ -2557,13 +2605,13 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
         for (const sub of chapter.subchapters) {
           const userCurrentStage = sub.currentStage || "none";
 
-          // We only do reading + quiz (no revise) => use getActivitiesForSub2
+          // Build tasks for each sub-chapter
           const subActs = getActivitiesForSub2(sub, {
             userCurrentStage,
             startStage,
             finalStage,
             wpm: finalWpm,
-            quizTime: quizTimeOverride
+            quizTime: quizTimeOverride,
           });
 
           for (const act of subActs) {
@@ -2575,21 +2623,29 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
               chapterId: chapter.id,
               chapterName: chapter.name || "",
               subChapterId: sub.id,
-              subChapterName: sub.name || ""
+              subChapterName: sub.name || "",
             });
           }
         }
       }
     }
 
-    // ------------------------
+    logDetails.push(
+      `Total number of tasks generated: ${allActivities.length}`
+    );
+
+    // ------------------------------------------------
     // I) Distribute into sessions
-    // ------------------------
+    // ------------------------------------------------
     const dailyTimeMins = finalDailyReadingTime;
     let dayIndex = 1;
     const sessions = [];
 
     let pendingTasks = [...allActivities];
+
+    logDetails.push(
+      `Now distributing tasks into daily sessions. Daily time = ${dailyTimeMins} mins, maxDayCount = ${maxDayCount}.`
+    );
 
     function buildNextDay() {
       return {
@@ -2607,6 +2663,9 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
           sessionLabel: currentDay.sessionLabel,
           activities: currentDay.activities,
         });
+        logDetails.push(
+          `Day ${currentDay.sessionLabel} finalized with ${currentDay.activities.length} activities taking ${currentDay.timeUsed} mins.`
+        );
         dayIndex++;
       }
       currentDay = buildNextDay();
@@ -2620,10 +2679,7 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
         const t = pendingTasks[i];
         const actTime = t.timeNeeded || 1;
         const leftover = dailyTimeMins - currentDay.timeUsed;
-        if (
-          actTime <= leftover &&
-          !currentDay.usedSubs.has(t.subChapterId)
-        ) {
+        if (actTime <= leftover && !currentDay.usedSubs.has(t.subChapterId)) {
           // place
           currentDay.activities.push(t);
           currentDay.timeUsed += actTime;
@@ -2666,9 +2722,548 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
       finalizeDay();
     }
 
-    // ------------------------
+    logDetails.push(
+      `Task distribution complete. Total days (sessions) used: ${sessions.length}.`
+    );
+
+    // ------------------------------------------------
     // J) Write planDoc
-    // ------------------------
+    // ------------------------------------------------
+    let singleBookId = "";
+    if (singleBookIdFromBody) {
+      singleBookId = singleBookIdFromBody;
+    } else if (selectedBooks && selectedBooks.length > 0) {
+      singleBookId = selectedBooks[0];
+    }
+
+    // Build the final document. We add 'logDetails' here:
+    const planDoc = {
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      planName: `Adaptive Plan (v2) for User ${userId}`,
+      userId,
+      targetDate: targetDateStr,
+      sessions,
+      maxDayCount,
+      wpmUsed: finalWpm,
+      dailyReadingTimeUsed: finalDailyReadingTime,
+      level,
+      bookId: singleBookId,
+      examId, // <-- store the exam type as well
+      logDetails, // <-- our verbose log
+    };
+
+    const newRef = await db.collection("adaptive_demo").add(planDoc);
+
+    return res.status(200).json({
+      message: "Successfully generated plan in 'adaptive_demo'.",
+      planId: newRef.id,
+      planDoc,
+    });
+  } catch (error) {
+    console.error("Error generating adaptive plan v2:", error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
+*/
+
+exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Headers", "Content-Type,Authorization");
+  res.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).send("");
+  }
+
+  // For logging
+  let logDetails = [];
+
+  try {
+    // ---------------------
+    // A) Basic Input
+    // ---------------------
+    const userId = req.query.userId || req.body.userId;
+    if (!userId) {
+      return res.status(400).json({ error: "Missing userId." });
+    }
+
+    const targetDateStr = req.query.targetDate || req.body.targetDate;
+    if (!targetDateStr) {
+      return res.status(400).json({ error: "Missing targetDate." });
+    }
+    const targetDate = new Date(targetDateStr);
+    if (isNaN(targetDate.getTime())) {
+      return res.status(400).json({ error: "Invalid targetDate format." });
+    }
+
+    const examId = req.query.examId || req.body.examId || "general";
+
+    // If no planId => aggregator might treat everything as "not started"
+    const planId = req.query.planId || req.body.planId || "";
+
+    const today = new Date();
+    let defaultMaxDayCount = getDaysBetween(today, targetDate);
+    if (defaultMaxDayCount < 0) defaultMaxDayCount = 0;
+
+    // -----------
+    // B) Overrides
+    // -----------
+    const maxDaysOverride =
+      req.body.maxDays !== undefined ? Number(req.body.maxDays) : null;
+    const wpmOverride = req.body.wpm !== undefined ? Number(req.body.wpm) : null;
+    const dailyReadingTimeOverride =
+      req.body.dailyReadingTime !== undefined
+        ? Number(req.body.dailyReadingTime)
+        : null;
+
+    const quizTimeOverride =
+      req.body.quizTime !== undefined ? Number(req.body.quizTime) : 5;
+
+    const level = req.body.planType || "none-basic";
+
+    // Book/chapter selection
+    const selectedBooks = Array.isArray(req.body.selectedBooks)
+      ? req.body.selectedBooks
+      : null;
+    const selectedChapters = Array.isArray(req.body.selectedChapters)
+      ? req.body.selectedChapters
+      : null;
+    const selectedSubChapters = Array.isArray(req.body.selectedSubChapters)
+      ? req.body.selectedSubChapters
+      : null;
+    const singleBookIdFromBody = req.body.bookId || "";
+
+    // Logging
+    logDetails.push(`User ID: ${userId}`);
+    logDetails.push(`Plan ID (for aggregator): ${planId}`);
+    logDetails.push(`Target Date: ${targetDateStr}`);
+    logDetails.push(`Exam ID: ${examId}`);
+    logDetails.push(`Plan Type: ${level}`);
+    logDetails.push(
+      `Overrides => maxDays: ${maxDaysOverride}, wpm: ${wpmOverride}, dailyReadingTime: ${dailyReadingTimeOverride}, quizTime: ${quizTimeOverride}`
+    );
+
+    // ---------------------
+    // C) Fetch Persona
+    // ---------------------
+    const db = admin.firestore();
+    const personaSnap = await db
+      .collection("learnerPersonas")
+      .where("userId", "==", userId)
+      .limit(1)
+      .get();
+    if (personaSnap.empty) {
+      return res
+        .status(404)
+        .json({ error: `No learner persona found for userId: ${userId}` });
+    }
+    const personaData = personaSnap.docs[0].data() || {};
+    if (!personaData.wpm || !personaData.dailyReadingTime) {
+      return res
+        .status(400)
+        .json({ error: "Persona doc must have 'wpm' and 'dailyReadingTime'." });
+    }
+    const finalWpm = wpmOverride || personaData.wpm;
+    const finalDailyReadingTime =
+      dailyReadingTimeOverride || personaData.dailyReadingTime;
+    let maxDayCount =
+      maxDaysOverride !== null ? maxDaysOverride : defaultMaxDayCount;
+
+    logDetails.push(
+      `Fetched persona => wpm=${personaData.wpm}, dailyReadingTime=${personaData.dailyReadingTime}`
+    );
+    logDetails.push(
+      `Final WPM used: ${finalWpm}, dailyReadingTime: ${finalDailyReadingTime}, maxDayCount: ${maxDayCount}`
+    );
+
+    // ---------------------
+    // D) Fetch exam config
+    // ---------------------
+    const examDocRef = db.collection("examConfigs").doc(examId);
+    const examDocSnap = await examDocRef.get();
+    if (!examDocSnap.exists) {
+      if (examId !== "general") {
+        return res
+          .status(400)
+          .json({ error: `No exam config found for examId='${examId}'.` });
+      } else {
+        return res
+          .status(400)
+          .json({ error: "No 'general' exam config found in examConfigs." });
+      }
+    }
+    const examConfig = examDocSnap.data() || {};
+    if (!examConfig.stages || !examConfig.planTypes) {
+      return res
+        .status(400)
+        .json({
+          error: `Exam config doc for '${examId}' missing 'stages' or 'planTypes'.`,
+        });
+    }
+    logDetails.push(
+      `Exam config loaded => stages=${JSON.stringify(examConfig.stages)}`
+    );
+
+    // We'll keep these helpers for startStage, finalStage
+    function getPlanTypeStages(planType) {
+      const mapping = examConfig.planTypes[planType];
+      if (!mapping) {
+        // fallback => first stage to last
+        return {
+          startStage: examConfig.stages[0],
+          finalStage: examConfig.stages[examConfig.stages.length - 1],
+        };
+      }
+      return mapping;
+    }
+    const { startStage, finalStage } = getPlanTypeStages(level);
+    logDetails.push(
+      `Plan type => start="${startStage}", final="${finalStage}".`
+    );
+
+    // ---------------------
+    // E) Call aggregator
+    // ---------------------
+    // We'll fetch aggregatorResult from your Cloud Run / Cloud Function endpoint
+    // e.g. "https://generateuserprogressaggregator2-zfztjkkvva-uc.a.run.app"
+    // If planId is missing => aggregator might treat everything as "not-started"
+    let aggregatorResult = {};
+    let aggregatorUrl = "https://generateuserprogressaggregator2-zfztjkkvva-uc.a.run.app"; // your aggregator URL
+    try {
+      // We'll do an axios call
+      const axios = require("axios");
+      const aggRes = await axios.get(aggregatorUrl, {
+        params: {
+          userId,
+          planId, // can be empty
+          bookId: singleBookIdFromBody || (selectedBooks && selectedBooks[0]) || "",
+        },
+      });
+      if (aggRes.data && aggRes.data.aggregatorResult) {
+        aggregatorResult = aggRes.data.aggregatorResult;
+        logDetails.push(
+          `Successfully fetched aggregator data => subCh count: ${Object.keys(
+            aggregatorResult
+          ).length}`
+        );
+      } else {
+        logDetails.push("Aggregator returned no aggregatorResult.");
+      }
+    } catch (err) {
+      logDetails.push(
+        `Error calling aggregator => ${err.message || err.toString()}`
+      );
+      // Fallback => aggregatorResult remains empty
+    }
+
+    // ---------------------
+    // F) Fetch Books + Subchapters
+    // ---------------------
+    let arrayOfBookIds = [];
+    if (selectedBooks && selectedBooks.length > 0) {
+      arrayOfBookIds = selectedBooks;
+    } else if (singleBookIdFromBody) {
+      arrayOfBookIds = [singleBookIdFromBody];
+    }
+    let booksSnap;
+    if (arrayOfBookIds.length > 0) {
+      booksSnap = await db
+        .collection("books_demo")
+        .where(admin.firestore.FieldPath.documentId(), "in", arrayOfBookIds)
+        .get();
+      logDetails.push(
+        `Fetching books by ID => ${JSON.stringify(arrayOfBookIds)}`
+      );
+    } else {
+      booksSnap = await db.collection("books_demo").get();
+      logDetails.push("Fetching all books (no IDs specified).");
+    }
+    const booksData = [];
+    for (const bookDoc of booksSnap.docs) {
+      const bookId = bookDoc.id;
+      const book = { id: bookId, ...bookDoc.data() };
+
+      // fetch chapters
+      let chaptersSnap;
+      if (selectedChapters && selectedChapters.length > 0) {
+        chaptersSnap = await db
+          .collection("chapters_demo")
+          .where("bookId", "==", bookId)
+          .where(admin.firestore.FieldPath.documentId(), "in", selectedChapters)
+          .get();
+      } else {
+        chaptersSnap = await db
+          .collection("chapters_demo")
+          .where("bookId", "==", bookId)
+          .get();
+      }
+      const chaptersData = [];
+      for (const chapterDoc of chaptersSnap.docs) {
+        const chId = chapterDoc.id;
+        const chData = chapterDoc.data();
+        const chapter = { id: chId, ...chData };
+
+        // fetch subchapters
+        let subSnap;
+        if (selectedSubChapters && selectedSubChapters.length > 0) {
+          subSnap = await db
+            .collection("subchapters_demo")
+            .where("chapterId", "==", chId)
+            .where(
+              admin.firestore.FieldPath.documentId(),
+              "in",
+              selectedSubChapters
+            )
+            .get();
+        } else {
+          subSnap = await db
+            .collection("subchapters_demo")
+            .where("chapterId", "==", chId)
+            .get();
+        }
+        const subData = subSnap.docs.map((sd) => ({ id: sd.id, ...sd.data() }));
+        chapter.subchapters = sortByNameWithNumericAware(subData);
+        chaptersData.push(chapter);
+      }
+      book.chapters = sortByNameWithNumericAware(chaptersData);
+      booksData.push(book);
+    }
+    logDetails.push(
+      `Total books fetched: ${booksData.length}. Building plan tasks next.`
+    );
+
+    // ---------------------
+    // G) Build tasks from aggregator
+    // ---------------------
+    const allActivities = [];
+    for (const book of booksData) {
+      if (!book.chapters) continue;
+      for (const chapter of book.chapters) {
+        if (!chapter.subchapters) continue;
+        for (const subCh of chapter.subchapters) {
+          const subChId = subCh.id;
+          // aggregatorResult[subChId] => { reading, readingNextTask, remember, rememberNextTask, ... }
+          const aggEntry = aggregatorResult[subChId] || null;
+
+          // We'll define a function to create a "READ" or "QUIZ" task if aggregator says the stage is not done
+          // aggregatorTask => aggregator's nextTask label
+          // aggregatorStatus => aggregator's stage status
+          function maybeCreateReadingTask() {
+            if (!aggEntry) {
+              // aggregator gave no data => treat as not started
+              // if we want to interpret "not started" => create reading
+              return {
+                type: "READ",
+                aggregatorTask: "READ",
+                aggregatorStatus: "not-started",
+                timeNeeded: subCh.wordCount
+                  ? Math.ceil(subCh.wordCount / finalWpm)
+                  : 5,
+              };
+            }
+            // aggregator says reading is aggregatorEntry.reading => "done"|"in-progress"|"locked"|"not-started"
+            if (aggEntry.reading === "done") {
+              // skip
+              return null;
+            }
+            // else => create a READ task
+            const readTime = subCh.wordCount
+              ? Math.ceil(subCh.wordCount / finalWpm)
+              : 5;
+            return {
+              type: "READ",
+              aggregatorTask: aggEntry.readingNextTask || "READ",
+              aggregatorStatus: aggEntry.reading,
+              timeNeeded: readTime,
+            };
+          }
+
+          function maybeCreateQuizTask(stageKey) {
+            // stageKey => "remember"|"understand"|"apply"|"analyze"
+            if (!aggEntry) {
+              // aggregator gave no data => treat as not started
+              return {
+                type: "QUIZ",
+                quizStage: stageKey,
+                aggregatorTask: "QUIZ1",
+                aggregatorStatus: "not-started",
+                timeNeeded: quizTimeOverride,
+              };
+            }
+            const stageStatus = aggEntry[stageKey]; // e.g. "done"|"in-progress"|"locked"|"not-started"
+            if (!stageStatus || stageStatus === "done") {
+              return null;
+            }
+            // aggregatorTask => aggregator says rememberNextTask, e.g. "QUIZ3", "REVISION3", etc.
+            const aggregatorTaskField = stageKey + "NextTask"; // e.g. "rememberNextTask"
+            const aggregatorTaskVal = aggEntry[aggregatorTaskField] || "QUIZ?";
+            return {
+              type: "QUIZ",
+              quizStage: stageKey,
+              aggregatorTask: aggregatorTaskVal,
+              aggregatorStatus: stageStatus,
+              timeNeeded: quizTimeOverride,
+            };
+          }
+
+          // If the user wants to respect the plan's startStage/finalStage:
+          // We'll skip QUIZ tasks for stages outside [startStage..finalStage].
+          // We'll do that by comparing stageToNumber w/ aggregator approach
+          const stIndex = (str) => examConfig.stages.indexOf(str);
+          const startIdx = stIndex(startStage);
+          const finalIdx = stIndex(finalStage);
+
+          // 1) reading => only if aggregator says not done
+          const readTask = maybeCreateReadingTask();
+          if (readTask) {
+            // We always do reading => if aggregator says done => skip
+            // no need to compare to startStage or finalStage, it's a separate step
+            allActivities.push({
+              ...readTask,
+              bookId: book.id,
+              bookName: book.name || "",
+              chapterId: chapter.id,
+              chapterName: chapter.name || "",
+              subChapterId: subChId,
+              subChapterName: subCh.name || "",
+              level,
+            });
+          }
+
+          // 2) for each quiz stage => "remember","understand","apply","analyze"
+          for (const stageKey of examConfig.stages) {
+            // skip "reading" if it's in the config
+            if (
+              stageKey === "reading" ||
+              stageKey === "none" ||
+              stageKey === ""
+            )
+              continue;
+
+            const stageIdx = stIndex(stageKey);
+            if (stageIdx < startIdx || stageIdx > finalIdx) {
+              // skip if outside plan's start->final range
+              continue;
+            }
+
+            if (
+              stageKey === "remember" ||
+              stageKey === "understand" ||
+              stageKey === "apply" ||
+              stageKey === "analyze"
+            ) {
+              // create quiz if aggregator says not done
+              const quizTask = maybeCreateQuizTask(stageKey);
+              if (quizTask) {
+                allActivities.push({
+                  ...quizTask,
+                  bookId: book.id,
+                  bookName: book.name || "",
+                  chapterId: chapter.id,
+                  chapterName: chapter.name || "",
+                  subChapterId: subChId,
+                  subChapterName: subCh.name || "",
+                  level,
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    logDetails.push(
+      `Total tasks built from aggregator: ${allActivities.length}`
+    );
+
+    // ---------------------
+    // H) Distribute tasks into sessions (same logic)
+    // ---------------------
+    const dailyTimeMins = finalDailyReadingTime;
+    let dayIndex = 1;
+    const sessions = [];
+    let pendingTasks = [...allActivities];
+
+    logDetails.push(
+      `Now distributing tasks => dailyTime=${dailyTimeMins}, maxDayCount=${maxDayCount}`
+    );
+
+    function buildNextDay() {
+      return {
+        sessionLabel: dayIndex.toString(),
+        activities: [],
+        timeUsed: 0,
+        usedSubs: new Set(),
+      };
+    }
+    let currentDay = buildNextDay();
+
+    function finalizeDay() {
+      if (currentDay.activities.length > 0) {
+        sessions.push({
+          sessionLabel: currentDay.sessionLabel,
+          activities: currentDay.activities,
+        });
+        logDetails.push(
+          `Day ${currentDay.sessionLabel}: ${currentDay.activities.length} activities, ${currentDay.timeUsed} mins`
+        );
+        dayIndex++;
+      }
+      currentDay = buildNextDay();
+    }
+
+    while (pendingTasks.length > 0 && dayIndex <= maxDayCount) {
+      let placed = false;
+
+      // 1) Try new sub-chapter first
+      for (let i = 0; i < pendingTasks.length; i++) {
+        const t = pendingTasks[i];
+        const actTime = t.timeNeeded || 1;
+        const leftover = dailyTimeMins - currentDay.timeUsed;
+        if (actTime <= leftover && !currentDay.usedSubs.has(t.subChapterId)) {
+          currentDay.activities.push(t);
+          currentDay.timeUsed += actTime;
+          currentDay.usedSubs.add(t.subChapterId);
+          pendingTasks.splice(i, 1);
+          placed = true;
+          break;
+        }
+      }
+      if (!placed) {
+        // 2) see if we can place same sub-ch again in leftover
+        let placedSame = false;
+        for (let i = 0; i < pendingTasks.length; i++) {
+          const t = pendingTasks[i];
+          const actTime = t.timeNeeded || 1;
+          const leftover = dailyTimeMins - currentDay.timeUsed;
+          if (actTime <= leftover) {
+            currentDay.activities.push(t);
+            currentDay.timeUsed += actTime;
+            currentDay.usedSubs.add(t.subChapterId);
+            pendingTasks.splice(i, 1);
+            placedSame = true;
+            break;
+          }
+        }
+        if (!placedSame) {
+          // finalize day
+          finalizeDay();
+        }
+      }
+      if (currentDay.timeUsed >= dailyTimeMins) {
+        finalizeDay();
+      }
+    }
+    if (currentDay.activities.length > 0 && dayIndex <= maxDayCount) {
+      finalizeDay();
+    }
+    logDetails.push(`Task distribution done. Total days: ${sessions.length}.`);
+
+    // ---------------------
+    // I) Write final plan doc
+    // ---------------------
     let singleBookId = "";
     if (singleBookIdFromBody) {
       singleBookId = singleBookIdFromBody;
@@ -2687,24 +3282,21 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
       dailyReadingTimeUsed: finalDailyReadingTime,
       level,
       bookId: singleBookId,
-      examId, // <-- store the exam type as well
+      examId,
+      logDetails,
     };
-
     const newRef = await db.collection("adaptive_demo").add(planDoc);
 
     return res.status(200).json({
-      message: "Successfully generated plan in 'adaptive_demo'.",
+      message: "Successfully generated plan (v2) in 'adaptive_demo'.",
       planId: newRef.id,
       planDoc,
     });
   } catch (error) {
-    console.error("Error generating adaptive plan v2:", error);
+    console.error("Error in generateAdaptivePlan2:", error);
     return res.status(500).json({ error: error.message });
   }
 });
-
-
-
 
 
 
@@ -3963,4 +4555,535 @@ ${subchBlock}
 `.trim();
 
   return instructions;
+}
+
+
+
+// The quiz stages in forced order
+const QUIZ_STAGES = ["remember", "understand", "apply", "analyze"];
+
+/**
+ * generateUserProgressAggregator2 (v2, unlimited attempts, always show nextTask)
+ * -----------------------------------------------------------------------------
+ * - For each subchapter, we do:
+ *   1) reading => "not-started" | "in-progress" | "done"
+ *   2) chain-based lock for remember → understand → apply → analyze
+ *       => if reading not done => remember status is "locked," etc.
+ *   3) For each quiz stage, we *still compute* the next quiz step or revision step
+ *      even if that stage is locked.
+ *   4) "activeStage" is whichever stage is actually open for progress in the chain.
+ *   5) We store aggregatorResult[subChId] = {
+ *        reading, remember, understand, apply, analyze,
+ *        readingNextTask, rememberNextTask, understandNextTask,
+ *        applyNextTask, analyzeNextTask, activeStage
+ *      }
+ */
+exports.generateUserProgressAggregator2 = onRequest(async (req, res) => {
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Headers", "Content-Type,Authorization");
+  res.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).send("");
+  }
+
+  try {
+    const userId = req.query.userId || req.body.userId;
+    const planId = req.query.planId || req.body.planId;
+    const bookId = req.query.bookId || req.body.bookId;
+    if (!userId || !planId || !bookId) {
+      return res.status(400).json({
+        error: "Missing userId, planId, or bookId.",
+      });
+    }
+
+    // 1) Fetch chapters => subchapters
+    const chaptersSnap = await db
+      .collection("chapters_demo")
+      .where("bookId", "==", bookId)
+      .get();
+    if (chaptersSnap.empty) {
+      return res.status(400).json({
+        error: `No chapters found for bookId=${bookId}.`,
+      });
+    }
+
+    const chaptersData = chaptersSnap.docs.map((chDoc) => ({
+      id: chDoc.id,
+      ...chDoc.data(),
+    }));
+
+    let allSubchapters = [];
+    for (const ch of chaptersData) {
+      const subsSnap = await db
+        .collection("subchapters_demo")
+        .where("chapterId", "==", ch.id)
+        .get();
+      subsSnap.forEach((sDoc) => {
+        allSubchapters.push({
+          id: sDoc.id,
+          chapterId: ch.id,
+          title: sDoc.data().title || sDoc.data().name || sDoc.id,
+        });
+      });
+    }
+
+    if (allSubchapters.length === 0) {
+      return res.status(200).json({
+        message: "No subchapters found for this book.",
+      });
+    }
+
+    // 2) Build reading stats
+    const readingStats = await buildReadingStats(userId, planId);
+
+    // 3) Build quizDataMap => quiz attempts, revision attempts, conceptStats, etc.
+    const quizDataMap = {};
+    for (const sub of allSubchapters) {
+      quizDataMap[sub.id] = {};
+      for (const stage of QUIZ_STAGES) {
+        quizDataMap[sub.id][stage] = {
+          quizAttempts: [],
+          revisionAttempts: [],
+          totalSeconds: 0,
+          totalConceptCount: 0,
+          allAttemptsConceptStats: [],
+        };
+      }
+    }
+
+    // 3a) quizzes_demo
+    const quizSnap = await db
+      .collection("quizzes_demo")
+      .where("userId", "==", userId)
+      .where("planId", "==", planId)
+      .get();
+    quizSnap.forEach((qDoc) => {
+      const d = qDoc.data();
+      const subChId = d.subchapterId || "";
+      const quizStage = (d.quizType || "").toLowerCase();
+      if (quizDataMap[subChId]?.[quizStage]) {
+        quizDataMap[subChId][quizStage].quizAttempts.push({
+          attemptNumber: d.attemptNumber || 1,
+          score: d.score || 0,
+          quizSubmission: d.quizSubmission || [],
+          timestamp: d.timestamp || null,
+        });
+      }
+    });
+
+    // 3b) revisions_demo
+    const revSnap = await db
+      .collection("revisions_demo")
+      .where("userId", "==", userId)
+      .where("planId", "==", planId)
+      .get();
+    revSnap.forEach((rDoc) => {
+      const d = rDoc.data();
+      const subChId = d.subchapterId || "";
+      const revisionStage = (d.revisionType || "").toLowerCase();
+      if (quizDataMap[subChId]?.[revisionStage]) {
+        quizDataMap[subChId][revisionStage].revisionAttempts.push({
+          revisionNumber: d.revisionNumber || 1,
+          timestamp: d.timestamp || null,
+        });
+      }
+    });
+
+    // 3c) quizTimeSubActivity
+    const quizTimeSnap = await db
+      .collection("quizTimeSubActivity")
+      .where("userId", "==", userId)
+      .where("planId", "==", planId)
+      .get();
+    quizTimeSnap.forEach((tDoc) => {
+      const d = tDoc.data();
+      const subChId = d.subChapterId || "";
+      const stage = (d.quizStage || "").toLowerCase();
+      if (quizDataMap[subChId]?.[stage]) {
+        quizDataMap[subChId][stage].totalSeconds += d.totalSeconds || 0;
+      }
+    });
+
+    // 3d) reviseTimeSubActivity
+    const reviseTimeSnap = await db
+      .collection("reviseTimeSubActivity")
+      .where("userId", "==", userId)
+      .where("planId", "==", planId)
+      .get();
+    reviseTimeSnap.forEach((rDoc) => {
+      const d = rDoc.data();
+      const subChId = d.subChapterId || "";
+      const stage = (d.quizStage || "").toLowerCase();
+      if (quizDataMap[subChId]?.[stage]) {
+        quizDataMap[subChId][stage].totalSeconds += d.totalSeconds || 0;
+      }
+    });
+
+    // 3e) subchapterConcepts_demo => build concept stats
+    const conceptsSnap = await db
+      .collection("subchapterConcepts_demo")
+      .where("bookId", "==", bookId)
+      .get();
+    const subChConceptsMap = {};
+    conceptsSnap.forEach((cDoc) => {
+      const cData = cDoc.data();
+      const scId = cData.subchapterId || "";
+      if (!subChConceptsMap[scId]) {
+        subChConceptsMap[scId] = [];
+      }
+      subChConceptsMap[scId].push({
+        name: cData.name || "UnnamedConcept",
+      });
+    });
+
+    // fill in totalConceptCount + conceptStats
+    for (const subChId in quizDataMap) {
+      for (const stage of QUIZ_STAGES) {
+        const stageObj = quizDataMap[subChId][stage];
+        const subChConcepts = subChConceptsMap[subChId] || [];
+        stageObj.totalConceptCount = subChConcepts.length;
+        stageObj.allAttemptsConceptStats = buildAllAttemptsConceptStats(
+          stageObj.quizAttempts,
+          subChConcepts
+        );
+      }
+    }
+
+    // 4) aggregatorResult => subChId => final object
+    const aggregatorResult = {};
+    for (const sub of allSubchapters) {
+      const subChId = sub.id;
+      // Reading
+      const rStats = readingStats[subChId] || null;
+      const readingDone = !!(rStats?.completionDate);
+      const readingStatus = readingDone
+        ? "done"
+        : (rStats?.totalTimeSpentMinutes || 0) > 0
+        ? "in-progress"
+        : "not-started";
+
+      // quiz stages => basic statuses
+      const rememberObj = quizDataMap[subChId].remember;
+      const rememberStage = getStageStatus(rememberObj);
+      const understandObj = quizDataMap[subChId].understand;
+      const understandStage = getStageStatus(understandObj);
+      const applyObj = quizDataMap[subChId].apply;
+      const applyStage = getStageStatus(applyObj);
+      const analyzeObj = quizDataMap[subChId].analyze;
+      const analyzeStage = getStageStatus(analyzeObj);
+
+      // chain => locked or not
+      const rememberLocked    = (readingStatus !== "done");
+      const finalRemember     = rememberLocked ? "locked" : rememberStage;
+      const understandLocked  = (finalRemember !== "done");
+      const finalUnderstand   = understandLocked ? "locked" : understandStage;
+      const applyLocked       = (finalUnderstand !== "done");
+      const finalApply        = applyLocked ? "locked" : applyStage;
+      const analyzeLocked     = (finalApply !== "done");
+      const finalAnalyze      = analyzeLocked ? "locked" : analyzeStage;
+
+      // Next tasks => ALWAYS compute them (like LibraryView3)
+      // Even if locked, we still produce the actual next quiz step
+      const readingNext   = getReadingTaskInfo(readingStatus);
+      const rememberNext  = getQuizStageTaskInfo(rememberObj, rememberStage);
+      const understandNext= getQuizStageTaskInfo(understandObj, understandStage);
+      const applyNext     = getQuizStageTaskInfo(applyObj, applyStage);
+      const analyzeNext   = getQuizStageTaskInfo(analyzeObj, analyzeStage);
+
+      // activeStage => reading incomplete => "reading"; else if remember not done => ...
+      let activeStage = "";
+      if (readingStatus !== "done") {
+        activeStage = "reading";
+      } else if (finalRemember !== "done" && finalRemember !== "locked") {
+        activeStage = "remember";
+      } else if (finalUnderstand !== "done" && finalUnderstand !== "locked") {
+        activeStage = "understand";
+      } else if (finalApply !== "done" && finalApply !== "locked") {
+        activeStage = "apply";
+      } else if (finalAnalyze !== "done" && finalAnalyze !== "locked") {
+        activeStage = "analyze";
+      }
+
+      aggregatorResult[subChId] = {
+        // 4a) statuses
+        reading: readingStatus,
+        remember: finalRemember,
+        understand: finalUnderstand,
+        apply: finalApply,
+        analyze: finalAnalyze,
+
+        // 4b) next tasks (always computed)
+        readingNextTask: readingNext.taskLabel,
+        rememberNextTask: rememberNext.taskLabel,
+        understandNextTask: understandNext.taskLabel,
+        applyNextTask: applyNext.taskLabel,
+        analyzeNextTask: analyzeNext.taskLabel,
+
+        // 4c) active stage
+        activeStage,
+      };
+    }
+
+    // 5) Store aggregator doc
+    const newDocRef = await db.collection("aggregator_v2").add({
+      userId,
+      planId,
+      bookId,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      aggregatorResult,
+    });
+
+    return res.status(200).json({
+      message: "Aggregator doc created successfully (infinite attempts, nextTask always shown).",
+      aggregatorDocId: newDocRef.id,
+      aggregatorResult,
+    });
+  } catch (err) {
+    console.error("Error in generateUserProgressAggregator2:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// -----------------------------------------------------
+// Helpers
+// -----------------------------------------------------
+
+/** buildReadingStats => merges reading_demo + readingSubActivity */
+async function buildReadingStats(userId, planId) {
+  const result = {};
+
+  const readDemoSnap = await db
+    .collection("reading_demo")
+    .where("userId", "==", userId)
+    .where("planId", "==", planId)
+    .get();
+  const completionMap = {};
+  readDemoSnap.forEach((docSnap) => {
+    const d = docSnap.data();
+    if (!d.subChapterId) return;
+    completionMap[d.subChapterId] = d.timestamp || null;
+  });
+
+  const readSubSnap = await db
+    .collection("readingSubActivity")
+    .where("userId", "==", userId)
+    .where("planId", "==", planId)
+    .get();
+  const timeMap = {};
+  readSubSnap.forEach((docSnap) => {
+    const d = docSnap.data();
+    const scId = d.subChapterId || "";
+    if (!timeMap[scId]) timeMap[scId] = 0;
+    timeMap[scId] += d.totalSeconds || 0;
+  });
+
+  Object.keys(timeMap).forEach((scId) => {
+    const totalSec = timeMap[scId];
+    const totalMinutes = totalSec / 60;
+    const complTS = completionMap[scId] || null;
+    result[scId] = {
+      totalTimeSpentMinutes: totalMinutes,
+      completionDate: convertToDate(complTS),
+    };
+  });
+
+  // subCh that appear in completionMap but not in timeMap
+  Object.keys(completionMap).forEach((scId) => {
+    if (!result[scId]) {
+      result[scId] = {
+        totalTimeSpentMinutes: 0,
+        completionDate: convertToDate(completionMap[scId]),
+      };
+    }
+  });
+
+  return result;
+}
+
+function convertToDate(ts) {
+  if (!ts) return null;
+  if (typeof ts.toDate === "function") {
+    return ts.toDate();
+  }
+  if (typeof ts.seconds === "number") {
+    return new Date(ts.seconds * 1000);
+  }
+  return null;
+}
+
+/**
+ * getStageStatus => "done", "in-progress", or "not-started" (unless we forcibly chain-lock it).
+ * If total concepts=0 but we have attempts or timeSpent => "in-progress".
+ */
+function getStageStatus(stageObj) {
+  if (!stageObj) return "not-started";
+  const totalConcepts = stageObj.totalConceptCount || 0;
+
+  if (totalConcepts === 0) {
+    if (stageObj.quizAttempts.length > 0 || stageObj.totalSeconds > 0) {
+      return "in-progress";
+    }
+    return "not-started";
+  }
+
+  const passCount = computePassCount(stageObj.allAttemptsConceptStats);
+  if (passCount >= totalConcepts) {
+    return "done";
+  } else if (
+    passCount > 0 ||
+    stageObj.totalSeconds > 0 ||
+    stageObj.quizAttempts.length > 0
+  ) {
+    return "in-progress";
+  }
+  return "not-started";
+}
+
+/** buildAllAttemptsConceptStats => for each quiz attempt => build concept stats */
+function buildAllAttemptsConceptStats(quizAttempts, conceptArr) {
+  if (!quizAttempts.length || !conceptArr.length) return [];
+  return quizAttempts.map((attempt) => {
+    const stats = buildConceptStats(attempt.quizSubmission || [], conceptArr);
+    return {
+      attemptNumber: attempt.attemptNumber,
+      score: attempt.score,
+      conceptStats: stats,
+    };
+  });
+}
+
+function buildConceptStats(quizSubmission, conceptArr) {
+  const countMap = {};
+  quizSubmission.forEach((q) => {
+    const cName = q.conceptName || "UnknownConcept";
+    if (!countMap[cName]) {
+      countMap[cName] = { correct: 0, total: 0 };
+    }
+    countMap[cName].total++;
+    if (q.score && parseFloat(q.score) >= 1) {
+      countMap[cName].correct++;
+    }
+  });
+
+  const conceptNamesSet = new Set(conceptArr.map((c) => c.name));
+  if (countMap["UnknownConcept"]) {
+    conceptNamesSet.add("UnknownConcept");
+  }
+
+  const statsArray = [];
+  conceptNamesSet.forEach((cName) => {
+    const rec = countMap[cName] || { correct: 0, total: 0 };
+    const ratio = rec.total > 0 ? rec.correct / rec.total : 0;
+    let passOrFail = "FAIL";
+    if (rec.total === 0) {
+      passOrFail = "NOT_TESTED";
+    } else if (ratio === 1.0) {
+      passOrFail = "PASS";
+    }
+    statsArray.push({
+      conceptName: cName,
+      correct: rec.correct,
+      total: rec.total,
+      ratio,
+      passOrFail,
+    });
+  });
+  return statsArray;
+}
+
+function computePassCount(allAttemptsConceptStats) {
+  if (!Array.isArray(allAttemptsConceptStats)) return 0;
+  const passedSet = new Set();
+  for (const attempt of allAttemptsConceptStats) {
+    for (const cs of attempt.conceptStats || []) {
+      if (cs.passOrFail === "PASS") {
+        passedSet.add(cs.conceptName);
+      }
+    }
+  }
+  return passedSet.size;
+}
+
+// ----- Next Task Logic (always computed, ignoring lock) -----
+
+/**
+ * getReadingTaskInfo
+ * => if reading not done => "READ"
+ * => else => no task
+ */
+function getReadingTaskInfo(readingStatus) {
+  if (readingStatus === "done") {
+    return { hasTask: false, taskLabel: "" };
+  }
+  return { hasTask: true, taskLabel: "READ" };
+}
+
+/**
+ * getQuizStageTaskInfo
+ * => If stage is "done" => no tasks
+ * => else => compute next quiz or revision step by sorting attempts
+ */
+function getQuizStageTaskInfo(stageObj, stageStatus) {
+  if (!stageObj) {
+    // no data => next => QUIZ1
+    return { hasTask: true, taskLabel: "QUIZ1" };
+  }
+  if (stageStatus === "done") {
+    return { hasTask: false, taskLabel: "" };
+  }
+
+  const quizAttempts = stageObj.quizAttempts || [];
+  const revisionAttempts = stageObj.revisionAttempts || [];
+  const combined = [];
+
+  // push quiz
+  quizAttempts.forEach((qa) => {
+    combined.push({
+      type: "quiz",
+      attemptNumber: qa.attemptNumber || 1,
+      timestamp: qa.timestamp || null,
+    });
+  });
+  // push revision
+  revisionAttempts.forEach((ra) => {
+    combined.push({
+      type: "revision",
+      attemptNumber: ra.revisionNumber || 1,
+      timestamp: ra.timestamp || null,
+    });
+  });
+
+  combined.sort((a, b) => {
+    const aMs = toMillis(a.timestamp);
+    const bMs = toMillis(b.timestamp);
+    if (aMs !== bMs) return aMs - bMs;
+    // fallback => attemptNumber
+    return a.attemptNumber - b.attemptNumber;
+  });
+
+  if (combined.length === 0) {
+    return { hasTask: true, taskLabel: "QUIZ1" };
+  }
+
+  // last step
+  const last = combined[combined.length - 1];
+  if (last.type === "quiz") {
+    return { hasTask: true, taskLabel: `REVISION${last.attemptNumber}` };
+  }
+  return { hasTask: true, taskLabel: `QUIZ${last.attemptNumber + 1}` };
+}
+
+function toMillis(ts) {
+  if (!ts) return 0;
+  if (typeof ts.seconds === "number") {
+    return ts.seconds * 1000;
+  }
+  if (ts instanceof Date) {
+    return ts.getTime();
+  }
+  if (ts._seconds) {
+    return ts._seconds * 1000;
+  }
+  return 0;
 }
