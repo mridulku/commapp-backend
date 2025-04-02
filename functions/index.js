@@ -2767,6 +2767,7 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
 
 
 */
+/* 2Apr
 
 exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
   res.set("Access-Control-Allow-Origin", "*");
@@ -3298,6 +3299,542 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
   }
 });
 
+*/
+
+exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Headers", "Content-Type,Authorization");
+  res.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).send("");
+  }
+
+  // For logging
+  let logDetails = [];
+
+  try {
+    // ---------------------
+    // A) Basic Input
+    // ---------------------
+    const userId = req.query.userId || req.body.userId;
+    if (!userId) {
+      return res.status(400).json({ error: "Missing userId." });
+    }
+
+    const targetDateStr = req.query.targetDate || req.body.targetDate;
+    if (!targetDateStr) {
+      return res.status(400).json({ error: "Missing targetDate." });
+    }
+    const targetDate = new Date(targetDateStr);
+    if (isNaN(targetDate.getTime())) {
+      return res.status(400).json({ error: "Invalid targetDate format." });
+    }
+
+    const examId = req.query.examId || req.body.examId || "general";
+
+    // If no planId => aggregator might treat everything as "not started"
+    const planId = req.query.planId || req.body.planId || "";
+
+    const today = new Date();
+    let defaultMaxDayCount = getDaysBetween(today, targetDate);
+    if (defaultMaxDayCount < 0) defaultMaxDayCount = 0;
+
+    // -----------
+    // B) Overrides
+    // -----------
+    const maxDaysOverride =
+      req.body.maxDays !== undefined ? Number(req.body.maxDays) : null;
+    const wpmOverride =
+      req.body.wpm !== undefined ? Number(req.body.wpm) : null;
+    const dailyReadingTimeOverride =
+      req.body.dailyReadingTime !== undefined
+        ? Number(req.body.dailyReadingTime)
+        : null;
+
+    const quizTimeOverride =
+      req.body.quizTime !== undefined ? Number(req.body.quizTime) : 5;
+
+    const level = req.body.planType || "none-basic";
+
+    // Book/chapter selection
+    const selectedBooks = Array.isArray(req.body.selectedBooks)
+      ? req.body.selectedBooks
+      : null;
+    const selectedChapters = Array.isArray(req.body.selectedChapters)
+      ? req.body.selectedChapters
+      : null;
+    const selectedSubChapters = Array.isArray(req.body.selectedSubChapters)
+      ? req.body.selectedSubChapters
+      : null;
+    const singleBookIdFromBody = req.body.bookId || "";
+
+    // Logging
+    logDetails.push(`User ID: ${userId}`);
+    logDetails.push(`Plan ID (for aggregator): ${planId}`);
+    logDetails.push(`Target Date: ${targetDateStr}`);
+    logDetails.push(`Exam ID: ${examId}`);
+    logDetails.push(`Plan Type: ${level}`);
+    logDetails.push(
+      `Overrides => maxDays: ${maxDaysOverride}, wpm: ${wpmOverride}, dailyReadingTime: ${dailyReadingTimeOverride}, quizTime: ${quizTimeOverride}`
+    );
+
+    // ---------------------
+    // C) Fetch Persona
+    // ---------------------
+    const db = admin.firestore();
+    const personaSnap = await db
+      .collection("learnerPersonas")
+      .where("userId", "==", userId)
+      .limit(1)
+      .get();
+    if (personaSnap.empty) {
+      return res
+        .status(404)
+        .json({ error: `No learner persona found for userId: ${userId}` });
+    }
+    const personaData = personaSnap.docs[0].data() || {};
+    if (!personaData.wpm || !personaData.dailyReadingTime) {
+      return res
+        .status(400)
+        .json({ error: "Persona doc must have 'wpm' and 'dailyReadingTime'." });
+    }
+    const finalWpm = wpmOverride || personaData.wpm;
+    const finalDailyReadingTime =
+      dailyReadingTimeOverride || personaData.dailyReadingTime;
+    let maxDayCount =
+      maxDaysOverride !== null ? maxDaysOverride : defaultMaxDayCount;
+
+    logDetails.push(
+      `Fetched persona => wpm=${personaData.wpm}, dailyReadingTime=${personaData.dailyReadingTime}`
+    );
+    logDetails.push(
+      `Final WPM used: ${finalWpm}, dailyReadingTime: ${finalDailyReadingTime}, maxDayCount: ${maxDayCount}`
+    );
+
+    // ---------------------
+    // D) Fetch exam config
+    // ---------------------
+    const examDocRef = db.collection("examConfigs").doc(examId);
+    const examDocSnap = await examDocRef.get();
+    if (!examDocSnap.exists) {
+      if (examId !== "general") {
+        return res
+          .status(400)
+          .json({ error: `No exam config found for examId='${examId}'.` });
+      } else {
+        return res
+          .status(400)
+          .json({ error: "No 'general' exam config found in examConfigs." });
+      }
+    }
+    const examConfig = examDocSnap.data() || {};
+    if (!examConfig.stages || !examConfig.planTypes) {
+      return res
+        .status(400)
+        .json({
+          error: `Exam config doc for '${examId}' missing 'stages' or 'planTypes'.`,
+        });
+    }
+    logDetails.push(
+      `Exam config loaded => stages=${JSON.stringify(examConfig.stages)}`
+    );
+
+    // We'll keep these helpers for startStage, finalStage
+    function getPlanTypeStages(planType) {
+      const mapping = examConfig.planTypes[planType];
+      if (!mapping) {
+        // fallback => first stage to last
+        return {
+          startStage: examConfig.stages[0],
+          finalStage: examConfig.stages[examConfig.stages.length - 1],
+        };
+      }
+      return mapping;
+    }
+    const { startStage, finalStage } = getPlanTypeStages(level);
+    logDetails.push(
+      `Plan type => start="${startStage}", final="${finalStage}".`
+    );
+
+    // ---------------------
+    // E) Call aggregator
+    // ---------------------
+    let aggregatorResult = {};
+    let aggregatorUrl =
+      "https://generateuserprogressaggregator2-zfztjkkvva-uc.a.run.app"; // your aggregator URL
+    try {
+      const axios = require("axios");
+      const aggRes = await axios.get(aggregatorUrl, {
+        params: {
+          userId,
+          planId, // can be empty
+          bookId:
+            singleBookIdFromBody || (selectedBooks && selectedBooks[0]) || "",
+        },
+      });
+      if (aggRes.data && aggRes.data.aggregatorResult) {
+        aggregatorResult = aggRes.data.aggregatorResult;
+        logDetails.push(
+          `Successfully fetched aggregator data => subCh count: ${Object.keys(
+            aggregatorResult
+          ).length}`
+        );
+      } else {
+        logDetails.push("Aggregator returned no aggregatorResult.");
+      }
+    } catch (err) {
+      logDetails.push(
+        `Error calling aggregator => ${err.message || err.toString()}`
+      );
+      // Fallback => aggregatorResult remains empty
+    }
+
+    // ---------------------
+    // F) Fetch Books + Subchapters
+    // ---------------------
+    let arrayOfBookIds = [];
+    if (selectedBooks && selectedBooks.length > 0) {
+      arrayOfBookIds = selectedBooks;
+    } else if (singleBookIdFromBody) {
+      arrayOfBookIds = [singleBookIdFromBody];
+    }
+    let booksSnap;
+    if (arrayOfBookIds.length > 0) {
+      booksSnap = await db
+        .collection("books_demo")
+        .where(admin.firestore.FieldPath.documentId(), "in", arrayOfBookIds)
+        .get();
+      logDetails.push(
+        `Fetching books by ID => ${JSON.stringify(arrayOfBookIds)}`
+      );
+    } else {
+      booksSnap = await db.collection("books_demo").get();
+      logDetails.push("Fetching all books (no IDs specified).");
+    }
+    const booksData = [];
+    for (const bookDoc of booksSnap.docs) {
+      const bookId = bookDoc.id;
+      const book = { id: bookId, ...bookDoc.data() };
+
+      // fetch chapters
+      let chaptersSnap;
+      if (selectedChapters && selectedChapters.length > 0) {
+        chaptersSnap = await db
+          .collection("chapters_demo")
+          .where("bookId", "==", bookId)
+          .where(admin.firestore.FieldPath.documentId(), "in", selectedChapters)
+          .get();
+      } else {
+        chaptersSnap = await db
+          .collection("chapters_demo")
+          .where("bookId", "==", bookId)
+          .get();
+      }
+      const chaptersData = [];
+      for (const chapterDoc of chaptersSnap.docs) {
+        const chId = chapterDoc.id;
+        const chData = chapterDoc.data();
+        const chapter = { id: chId, ...chData };
+
+        // fetch subchapters
+        let subSnap;
+        if (selectedSubChapters && selectedSubChapters.length > 0) {
+          subSnap = await db
+            .collection("subchapters_demo")
+            .where("chapterId", "==", chId)
+            .where(
+              admin.firestore.FieldPath.documentId(),
+              "in",
+              selectedSubChapters
+            )
+            .get();
+        } else {
+          subSnap = await db
+            .collection("subchapters_demo")
+            .where("chapterId", "==", chId)
+            .get();
+        }
+        const subData = subSnap.docs.map((sd) => ({
+          id: sd.id,
+          ...sd.data(),
+        }));
+        chapter.subchapters = sortByNameWithNumericAware(subData);
+        chaptersData.push(chapter);
+      }
+      book.chapters = sortByNameWithNumericAware(chaptersData);
+      booksData.push(book);
+    }
+    logDetails.push(
+      `Total books fetched: ${booksData.length}. Building plan tasks next.`
+    );
+
+    // ---------------------
+    // G) Build tasks from aggregator
+    // ---------------------
+    const allActivities = [];
+
+    // Helper to return index of a stage within examConfig.stages
+    const stIndex = (str) => examConfig.stages.indexOf(str);
+    const startIdx = stIndex(startStage);
+    const finalIdx = stIndex(finalStage);
+
+    function maybeCreateReadingTask(subCh, aggEntry) {
+      if (!aggEntry) {
+        // aggregator gave no data => treat as not started
+        return {
+          type: "READ",
+          aggregatorTask: "READ",
+          aggregatorStatus: "not-started",
+          timeNeeded: subCh.wordCount
+            ? Math.ceil(subCh.wordCount / finalWpm)
+            : 5,
+        };
+      }
+      // aggregator says reading => "done"|"in-progress"|"locked"|"not-started"
+      if (aggEntry.reading === "done") {
+        return null;
+      }
+      // else => create a READ task
+      const readTime = subCh.wordCount
+        ? Math.ceil(subCh.wordCount / finalWpm)
+        : 5;
+      return {
+        type: "READ",
+        aggregatorTask: aggEntry.readingNextTask || "READ",
+        aggregatorStatus: aggEntry.reading,
+        timeNeeded: readTime,
+      };
+    }
+
+    function maybeCreateQuizTask(subCh, aggEntry, stageKey) {
+      // skip if aggregator says stage is done or doesn't exist
+      if (!aggEntry) {
+        // aggregator gave no data => treat as not started
+        return {
+          type: "QUIZ",
+          quizStage: stageKey,
+          aggregatorTask: "QUIZ1",
+          aggregatorStatus: "not-started",
+          timeNeeded: quizTimeOverride,
+        };
+      }
+      const stageStatus = aggEntry[stageKey]; // e.g. "done"|"in-progress"|"locked"|"not-started"
+      if (!stageStatus || stageStatus === "done") {
+        return null;
+      }
+      const aggregatorTaskField = stageKey + "NextTask"; // e.g. "rememberNextTask"
+      const aggregatorTaskVal = aggEntry[aggregatorTaskField] || "QUIZ?";
+      return {
+        type: "QUIZ",
+        quizStage: stageKey,
+        aggregatorTask: aggregatorTaskVal,
+        aggregatorStatus: stageStatus,
+        timeNeeded: quizTimeOverride,
+      };
+    }
+
+    for (const book of booksData) {
+      if (!book.chapters) continue;
+      for (const chapter of book.chapters) {
+        if (!chapter.subchapters) continue;
+        for (const subCh of chapter.subchapters) {
+          const subChId = subCh.id;
+          const aggEntry = aggregatorResult[subChId] || null;
+
+          // 1) Possibly create reading task
+          const readTask = maybeCreateReadingTask(subCh, aggEntry);
+          if (readTask) {
+            allActivities.push({
+              ...readTask,
+              bookId: book.id,
+              bookName: book.name || "",
+              chapterId: chapter.id,
+              chapterName: chapter.name || "",
+              subChapterId: subChId,
+              subChapterName: subCh.name || "",
+              level,
+            });
+
+            // Immediately schedule the remember task if it's within [startStage..finalStage] and needed
+            const rememberIdx = stIndex("remember");
+            if (
+              rememberIdx >= startIdx &&
+              rememberIdx <= finalIdx &&
+              examConfig.stages.includes("remember")
+            ) {
+              const rememberTask = maybeCreateQuizTask(subCh, aggEntry, "remember");
+              if (rememberTask) {
+                allActivities.push({
+                  ...rememberTask,
+                  bookId: book.id,
+                  bookName: book.name || "",
+                  chapterId: chapter.id,
+                  chapterName: chapter.name || "",
+                  subChapterId: subChId,
+                  subChapterName: subCh.name || "",
+                  level,
+                });
+              }
+            }
+          }
+
+          // 2) For each quiz stage other than 'reading'/'remember'/'none'/''
+          for (const stageKey of examConfig.stages) {
+            if (
+              stageKey === "reading" ||
+              stageKey === "remember" ||
+              stageKey === "none" ||
+              stageKey === ""
+            ) {
+              continue;
+            }
+            const stageIdx = stIndex(stageKey);
+            if (stageIdx < startIdx || stageIdx > finalIdx) {
+              continue; // skip if outside plan's range
+            }
+
+            // aggregator says this stage might be incomplete => create quiz
+            const quizTask = maybeCreateQuizTask(subCh, aggEntry, stageKey);
+            if (quizTask) {
+              allActivities.push({
+                ...quizTask,
+                bookId: book.id,
+                bookName: book.name || "",
+                chapterId: chapter.id,
+                chapterName: chapter.name || "",
+                subChapterId: subChId,
+                subChapterName: subCh.name || "",
+                level,
+              });
+            }
+          }
+        }
+      }
+    }
+
+    logDetails.push(
+      `Total tasks built from aggregator: ${allActivities.length}`
+    );
+
+    // ---------------------
+    // H) Distribute tasks into sessions (revised to preserve order)
+    // ---------------------
+    const dailyTimeMins = finalDailyReadingTime;
+    let dayIndex = 1;
+    const sessions = [];
+    let pendingTasks = [...allActivities];
+
+    logDetails.push(
+      `Now distributing tasks => dailyTime=${dailyTimeMins}, maxDayCount=${maxDayCount}`
+    );
+
+    function buildNextDay() {
+      return {
+        sessionLabel: dayIndex.toString(),
+        activities: [],
+        timeUsed: 0,
+      };
+    }
+    let currentDay = buildNextDay();
+
+    function finalizeDay() {
+      if (currentDay.activities.length > 0) {
+        sessions.push({
+          sessionLabel: currentDay.sessionLabel,
+          activities: currentDay.activities,
+        });
+        logDetails.push(
+          `Day ${currentDay.sessionLabel}: ${currentDay.activities.length} activities, ${currentDay.timeUsed} mins`
+        );
+        dayIndex++;
+      }
+      currentDay = buildNextDay();
+    }
+
+    // Simple FIFO approach: take tasks in the order they appear in pendingTasks.
+    while (pendingTasks.length > 0 && dayIndex <= maxDayCount) {
+      const leftover = dailyTimeMins - currentDay.timeUsed;
+      if (leftover <= 0) {
+        // No more time left in this day
+        finalizeDay();
+        continue;
+      }
+
+      const nextTask = pendingTasks[0];
+      const actTime = nextTask.timeNeeded || 1;
+      if (actTime <= leftover) {
+        // It fits => schedule it now
+        currentDay.activities.push(nextTask);
+        currentDay.timeUsed += actTime;
+        pendingTasks.shift(); // Remove from front
+      } else {
+        // Not enough leftover => finalize day
+        finalizeDay();
+      }
+    }
+
+    // If we still have tasks left but ran out of days, we just won't schedule them
+    // If we have leftover day, finalize it anyway:
+    if (currentDay.activities.length > 0 && dayIndex <= maxDayCount) {
+      finalizeDay();
+    }
+
+    logDetails.push(`Task distribution done. Total days: ${sessions.length}.`);
+
+    // ---------------------
+    // I) Write final plan doc
+    // ---------------------
+    let singleBookId = "";
+    if (singleBookIdFromBody) {
+      singleBookId = singleBookIdFromBody;
+    } else if (selectedBooks && selectedBooks.length > 0) {
+      singleBookId = selectedBooks[0];
+    }
+
+    const planDoc = {
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      planName: `Adaptive Plan (v2) for User ${userId}`,
+      userId,
+      targetDate: targetDateStr,
+      sessions,
+      maxDayCount,
+      wpmUsed: finalWpm,
+      dailyReadingTimeUsed: finalDailyReadingTime,
+      level,
+      bookId: singleBookId,
+      examId,
+      logDetails,
+    };
+    const newRef = await db.collection("adaptive_demo").add(planDoc);
+
+    return res.status(200).json({
+      message: "Successfully generated plan (v2) in 'adaptive_demo'.",
+      planId: newRef.id,
+      planDoc,
+    });
+  } catch (error) {
+    console.error("Error in generateAdaptivePlan2:", error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// -------------------------------------------------------------------------------------------
+// Utility function used above (unchanged):
+function getDaysBetween(d1, d2) {
+  const diff = d2.getTime() - d1.getTime();
+  return Math.ceil(diff / (1000 * 60 * 60 * 24));
+}
+
+// Utility for sorting by numeric-aware name:
+function sortByNameWithNumericAware(arr) {
+  // Example: "Chapter 1", "Chapter 2" should come before "Chapter 10", etc.
+  return arr.slice().sort((a, b) => {
+    const nameA = (a.name || "").toString();
+    const nameB = (b.name || "").toString();
+    return nameA.localeCompare(nameB, undefined, { numeric: true });
+  });
+}
 
 
 /**
