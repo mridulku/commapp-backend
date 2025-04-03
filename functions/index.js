@@ -3837,6 +3837,88 @@ function sortByNameWithNumericAware(arr) {
 }
 
 
+
+exports.adaptPlanTest = onRequest(async (req, res) => {
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Headers", "Content-Type,Authorization");
+  res.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).send("");
+  }
+
+  try {
+    // 1) Parse Inputs: planId, userId
+    const userId = req.query.userId || req.body.userId;
+    const planId = req.query.planId || req.body.planId;
+
+    if (!userId) {
+      return res.status(400).json({ error: "Missing userId." });
+    }
+    if (!planId) {
+      return res.status(400).json({ error: "Missing planId." });
+    }
+
+    // 2) Fetch the existing plan from 'adaptive_demo' collection
+    const db = admin.firestore();
+    const planRef = db.collection("adaptive_demo").doc(planId);
+    const planSnap = await planRef.get();
+    if (!planSnap.exists) {
+      return res.status(404).json({
+        error: `No plan doc found in 'adaptive_demo' with ID='${planId}'.`,
+      });
+    }
+    const planDoc = planSnap.data();
+
+    // Optional check: if planDoc.userId !== userId => you might reject
+    if (planDoc.userId !== userId) {
+      return res
+        .status(400)
+        .json({ error: "planDoc.userId does not match provided userId." });
+    }
+
+    // 3) Iterate over sessions & activities, add fields
+    let modifiedCount = 0;
+    const nowISO = new Date().toISOString();
+
+    // Make sure planDoc.sessions is an array
+    if (Array.isArray(planDoc.sessions)) {
+      for (const session of planDoc.sessions) {
+        if (!Array.isArray(session.activities)) continue;
+
+        for (const activity of session.activities) {
+          activity.modified = true;
+          activity.modifiedTimestamp = nowISO;
+          modifiedCount++;
+        }
+      }
+    }
+
+    // 4) Optionally log an overall "adaptationHistory" record at top-level
+    if (!planDoc.adaptationHistory) {
+      planDoc.adaptationHistory = [];
+    }
+    planDoc.adaptationHistory.push({
+      action: "adaptPlanTest",
+      timestamp: nowISO,
+      details: `Set modified=true on ${modifiedCount} activities`,
+    });
+
+    // 5) Write updated planDoc back to Firestore
+    await planRef.set(planDoc, { merge: true });
+
+    // 6) Return success
+    return res.status(200).json({
+      message: `Successfully updated plan with ID='${planId}'.`,
+      modifiedCount,
+    });
+  } catch (error) {
+    console.error("Error in adaptPlanTest:", error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
 /**
  * 1) onExamPDFUpload
  * ------------------
