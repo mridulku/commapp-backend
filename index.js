@@ -4811,6 +4811,13 @@ app.post("/api/setCompletionStatus", async (req, res) => {
 // Make sure you already did: const admin = require("firebase-admin");
 // And that you have admin.initializeApp(...) somewhere at startup
 
+/**
+ * POST /api/markActivityCompletion
+ * Body: { userId, planId, activityId, completionStatus }
+ *
+ * If completionStatus="deferred", automatically replicate this activity
+ * to the next session (creating a new session if needed).
+ */
 app.post("/api/markActivityCompletion", async (req, res) => {
   try {
     const { userId, planId, activityId, completionStatus } = req.body;
@@ -4839,36 +4846,78 @@ app.post("/api/markActivityCompletion", async (req, res) => {
       });
     }
 
-    // 4) Locate the matching activity by activityId
-    let found = false;
-    if (Array.isArray(planData.sessions)) {
-      for (const session of planData.sessions) {
-        if (!Array.isArray(session.activities)) continue;
-        for (const act of session.activities) {
-          if (act.activityId === activityId) {
-            // 5) Update the completionStatus
-            act.completionStatus = completionStatus;
-            found = true;
-            break;
-          }
-        }
-        if (found) break;
-      }
+    if (!Array.isArray(planData.sessions)) {
+      planData.sessions = [];
     }
 
-    if (!found) {
+    // 4) Locate the matching activity by activityId
+    let foundSessionIndex = -1;
+    let foundActivityIndex = -1;
+
+    for (let sIdx = 0; sIdx < planData.sessions.length; sIdx++) {
+      const session = planData.sessions[sIdx];
+      if (!Array.isArray(session.activities)) continue;
+
+      for (let aIdx = 0; aIdx < session.activities.length; aIdx++) {
+        const act = session.activities[aIdx];
+        if (act.activityId === activityId) {
+          // 5) Update the completionStatus
+          act.completionStatus = completionStatus;
+
+          // Mark indexes so we can replicate if needed
+          foundSessionIndex = sIdx;
+          foundActivityIndex = aIdx;
+          break;
+        }
+      }
+      if (foundActivityIndex >= 0) break;
+    }
+
+    if (foundSessionIndex < 0 || foundActivityIndex < 0) {
       return res.status(404).json({
         error: `Activity '${activityId}' not found in plan '${planId}'.`
       });
     }
 
-    // 6) Save updated plan data back to Firestore
+    // 6) If we just deferred this activity => replicate it to next session
+    if (completionStatus === "deferred") {
+      const lastSessionIndex = planData.sessions.length - 1;
+      let targetSessionIndex = foundSessionIndex + 1;
+
+      // If there's no "next" session, create one
+      if (targetSessionIndex > lastSessionIndex) {
+        // optional: generate a sessionLabel or do something else
+        planData.sessions.push({
+          sessionLabel: `${planData.sessions.length + 1}`,
+          activities: [],
+        });
+        targetSessionIndex = planData.sessions.length - 1; // newly created
+      }
+
+      const originalActivity =
+        planData.sessions[foundSessionIndex].activities[foundActivityIndex];
+
+      // Make a deep copy
+      const newActivity = JSON.parse(JSON.stringify(originalActivity));
+
+      // Assign a new ID
+      const newUuid = uuidv4(); // import from 'uuid'
+      newActivity.activityId = newUuid;
+
+      // (Optionally) reset the status of the replicated copy
+      newActivity.completionStatus = null; // or "not-started"
+
+      // Insert at start of next session
+      planData.sessions[targetSessionIndex].activities.unshift(newActivity);
+    }
+
+    // 7) Save updated plan data back to Firestore
     await planRef.set(planData, { merge: true });
 
-    // 7) Return success response
+    // 8) Return success response
     return res.status(200).json({
-      message: `Activity '${activityId}' set to '${completionStatus}'`,
-      planId
+      message: `Activity '${activityId}' set to '${completionStatus}'.`,
+      planId,
     });
   } catch (err) {
     console.error("Error in POST /api/markActivityCompletion:", err);
