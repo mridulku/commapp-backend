@@ -1,7 +1,7 @@
 require("dotenv").config();
 
 
-
+const { v4: uuidv4 } = require("uuid");
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
@@ -4730,6 +4730,177 @@ function toMillis(ts) {
   if (ts instanceof Date) return ts.getTime();
   return 0;
 }
+
+
+
+/**
+ * POST /api/deferActivity
+ * Body: { userId, planId, activityId }
+ *
+ *  1) Fetch the plan doc from "adaptive_demo" by planId
+ *  2) Check planData.userId == userId (for security)
+ *  3) Locate the activity => set: activity.deferred = true, activity.deferredTime = new Date().toISOString()
+ *  4) Save the doc back
+ */
+// In your server file (index.js or server.js)
+app.post("/api/setCompletionStatus", async (req, res) => {
+  try {
+    const { userId, planId, activityId, completionStatus } = req.body;
+    if (!userId || !planId || !activityId || !completionStatus) {
+      return res.status(400).json({
+        error: "Missing userId, planId, activityId, or completionStatus.",
+      });
+    }
+
+    const db = admin.firestore();
+    const planRef = db.collection("adaptive_demo").doc(planId);
+    const planSnap = await planRef.get();
+
+    if (!planSnap.exists) {
+      return res
+        .status(404)
+        .json({ error: `No plan found with planId='${planId}'` });
+    }
+
+    const planData = planSnap.data();
+    // Optional security check
+    if (planData.userId !== userId) {
+      return res
+        .status(403)
+        .json({ error: "You do not have permission to modify this plan." });
+    }
+
+    let found = false;
+    if (Array.isArray(planData.sessions)) {
+      for (const session of planData.sessions) {
+        if (!Array.isArray(session.activities)) continue;
+        for (const act of session.activities) {
+          if (act.activityId === activityId) {
+            // Just set completionStatus
+            act.completionStatus = completionStatus;
+            // You could also remove older fields like act.deferred or act.deferredTime
+            found = true;
+            break;
+          }
+        }
+        if (found) break;
+      }
+    }
+
+    if (!found) {
+      return res
+        .status(404)
+        .json({ error: `Activity '${activityId}' not found in plan.` });
+    }
+
+    await planRef.set(planData, { merge: true });
+
+    return res.status(200).json({
+      message: `Activity '${activityId}' set to completionStatus='${completionStatus}'`,
+      planId,
+    });
+  } catch (err) {
+    console.error("Error in POST /api/setCompletionStatus:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+/**
+ * POST /api/replicateActivity
+ * Body: { userId, planId, activityId }
+ *
+ * Steps:
+ *  1) Load plan from "adaptive_demo" by planId
+ *  2) Ensure planData.userId == userId
+ *  3) Find sessionIndex + activityIndex where activityId matches
+ *  4) Make a copy => new activityId => place at start of next session's activities
+ *  5) Save doc
+ */
+app.post("/api/replicateActivity", async (req, res) => {
+  try {
+    const { userId, planId, activityId } = req.body;
+    if (!userId || !planId || !activityId) {
+      return res
+        .status(400)
+        .json({ error: "Missing userId, planId, or activityId." });
+    }
+
+    const db = admin.firestore();
+    const planRef = db.collection("adaptive_demo").doc(planId);
+    const planSnap = await planRef.get();
+
+    if (!planSnap.exists) {
+      return res
+        .status(404)
+        .json({ error: `No plan doc found with planId='${planId}'` });
+    }
+
+    const planData = planSnap.data();
+    if (planData.userId !== userId) {
+      return res.status(403).json({ error: "User does not own this plan." });
+    }
+
+    if (!Array.isArray(planData.sessions)) {
+      return res.status(400).json({ error: "planData.sessions is not an array." });
+    }
+
+    // 1) Find session + activity index
+    let foundSessionIndex = -1;
+    let foundActivityIndex = -1;
+
+    planData.sessions.forEach((sess, sIdx) => {
+      if (!Array.isArray(sess.activities)) return;
+      sess.activities.forEach((act, aIdx) => {
+        if (act.activityId === activityId) {
+          foundSessionIndex = sIdx;
+          foundActivityIndex = aIdx;
+        }
+      });
+    });
+
+    if (foundSessionIndex < 0 || foundActivityIndex < 0) {
+      return res
+        .status(404)
+        .json({ error: `Activity '${activityId}' not found in plan.` });
+    }
+
+    // 2) If this is the last session => error or create new
+    const nextSessionIndex = foundSessionIndex + 1;
+    if (nextSessionIndex >= planData.sessions.length) {
+      // If you want to create a new session automatically, do so here.
+      // For now, let's just return an error:
+      return res
+        .status(400)
+        .json({ error: "No 'next day' to replicate into (this is the last session)." });
+    }
+
+    // 3) Make a copy of the activity
+    const originalActivity =
+      planData.sessions[foundSessionIndex].activities[foundActivityIndex];
+    // Deep clone
+    const newActivity = JSON.parse(JSON.stringify(originalActivity));
+    // Assign a new activityId
+    newActivity.activityId = uuidv4();
+    // (Optional) remove any fields you don't want copied exactly, e.g.:
+    // newActivity.deferred = false;
+
+    // 4) Insert at start (index 0) of next session's activities
+    planData.sessions[nextSessionIndex].activities.unshift(newActivity);
+
+    // 5) Save updated doc
+    await planRef.set(planData, { merge: true });
+
+    return res.status(200).json({
+      message: `Successfully replicated activity '${activityId}' into session index ${nextSessionIndex}.`,
+      newActivityId: newActivity.activityId,
+    });
+  } catch (err) {
+    console.error("Error in /api/replicateActivity:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 
 
