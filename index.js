@@ -4805,7 +4805,76 @@ app.post("/api/setCompletionStatus", async (req, res) => {
   }
 });
 
+// In your expressindex.js or routes file:
 
+// In your Express server file (e.g. expressindex.js)
+// Make sure you already did: const admin = require("firebase-admin");
+// And that you have admin.initializeApp(...) somewhere at startup
+
+app.post("/api/markActivityCompletion", async (req, res) => {
+  try {
+    const { userId, planId, activityId, completionStatus } = req.body;
+
+    // 1) Validate input
+    if (!userId || !planId || !activityId || !completionStatus) {
+      return res.status(400).json({
+        error: "Missing userId, planId, activityId, or completionStatus."
+      });
+    }
+
+    // 2) Get the plan doc from "adaptive_demo" collection
+    const planRef = db.collection("adaptive_demo").doc(planId);
+    const planSnap = await planRef.get();
+    if (!planSnap.exists) {
+      return res.status(404).json({
+        error: `No plan found with planId='${planId}'`
+      });
+    }
+
+    // 3) Optionally enforce ownership
+    const planData = planSnap.data();
+    if (planData.userId !== userId) {
+      return res.status(403).json({
+        error: "You do not have permission to modify this plan."
+      });
+    }
+
+    // 4) Locate the matching activity by activityId
+    let found = false;
+    if (Array.isArray(planData.sessions)) {
+      for (const session of planData.sessions) {
+        if (!Array.isArray(session.activities)) continue;
+        for (const act of session.activities) {
+          if (act.activityId === activityId) {
+            // 5) Update the completionStatus
+            act.completionStatus = completionStatus;
+            found = true;
+            break;
+          }
+        }
+        if (found) break;
+      }
+    }
+
+    if (!found) {
+      return res.status(404).json({
+        error: `Activity '${activityId}' not found in plan '${planId}'.`
+      });
+    }
+
+    // 6) Save updated plan data back to Firestore
+    await planRef.set(planData, { merge: true });
+
+    // 7) Return success response
+    return res.status(200).json({
+      message: `Activity '${activityId}' set to '${completionStatus}'`,
+      planId
+    });
+  } catch (err) {
+    console.error("Error in POST /api/markActivityCompletion:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 /**
  * POST /api/replicateActivity
