@@ -3954,265 +3954,16 @@ app.get("/api/cumulativeReviseTime", async (req, res) => {
 
 
 // Matches your “cloud aggregator” QUIZ_STAGES
+
+// =============================
+// File: index.js (or wherever your /subchapter-status is defined)
+// =============================
+
+
 const QUIZ_STAGES = ["remember", "understand", "apply", "analyze"];
 
 
-async function buildReadingStats(userId, planId) {
-  const result = {};
 
-  // reading_demo => completions
-  const readDemoSnap = await db
-    .collection("reading_demo")
-    .where("userId", "==", userId)
-    .where("planId", "==", planId)
-    .get();
-
-  const completionMap = {};
-  readDemoSnap.forEach((docSnap) => {
-    const d = docSnap.data();
-    if (!d.subChapterId) return;
-    completionMap[d.subChapterId] = d.timestamp || null;
-  });
-
-  // readingSubActivity => lumps of reading time
-  const readSubSnap = await db
-    .collection("readingSubActivity")
-    .where("userId", "==", userId)
-    .where("planId", "==", planId)
-    .get();
-
-  const timeMap = {};
-  readSubSnap.forEach((docSnap) => {
-    const d = docSnap.data();
-    const scId = d.subChapterId || "";
-    if (!timeMap[scId]) timeMap[scId] = 0;
-    timeMap[scId] += d.totalSeconds || 0;
-  });
-
-  // Merge reading data
-  Object.keys(timeMap).forEach((scId) => {
-    const totalSec = timeMap[scId];
-    const totalMinutes = totalSec / 60;
-    const complTS = completionMap[scId] || null;
-    result[scId] = {
-      totalTimeSpentMinutes: totalMinutes,
-      completionDate: convertToDate(complTS),
-    };
-  });
-
-  // subChs that appear in completionMap but not in timeMap => mark timeSpent=0
-  Object.keys(completionMap).forEach((scId) => {
-    if (!result[scId]) {
-      const complTS = completionMap[scId];
-      result[scId] = {
-        totalTimeSpentMinutes: 0,
-        completionDate: convertToDate(complTS),
-      };
-    }
-  });
-
-  return result;
-}
-
-function convertToDate(ts) {
-  if (!ts) return null;
-  if (typeof ts.toDate === "function") {
-    return ts.toDate();
-  }
-  if (typeof ts.seconds === "number") {
-    return new Date(ts.seconds * 1000);
-  }
-  return null;
-}
-
-/**
- * getStageStatus(stageObj)
- * => "done","in-progress","not-started"
- * If totalConceptCount=0 but attempts/timeSpent>0 => "in-progress"
- */
-function getStageStatus(stageObj) {
-  if (!stageObj) return "not-started";
-  const totalConcepts = stageObj.totalConceptCount || 0;
-
-  if (totalConcepts === 0) {
-    if (stageObj.quizAttempts.length > 0 || stageObj.totalSeconds > 0) {
-      return "in-progress";
-    }
-    return "not-started";
-  }
-
-  const passCount = computePassCount(stageObj.allAttemptsConceptStats);
-  if (passCount >= totalConcepts) {
-    return "done";
-  } else if (
-    passCount > 0 ||
-    stageObj.totalSeconds > 0 ||
-    stageObj.quizAttempts.length > 0
-  ) {
-    return "in-progress";
-  }
-  return "not-started";
-}
-
-/**
- * buildAllAttemptsConceptStats(quizAttempts, conceptArr)
- * => array of { attemptNumber, score, conceptStats }
- */
-function buildAllAttemptsConceptStats(quizAttempts, conceptArr) {
-  if (!quizAttempts.length || !conceptArr.length) return [];
-  return quizAttempts.map((attempt) => {
-    const stats = buildConceptStats(attempt.quizSubmission || [], conceptArr);
-    return {
-      attemptNumber: attempt.attemptNumber,
-      score: attempt.score,
-      conceptStats: stats,
-    };
-  });
-}
-
-/**
- * buildConceptStats(quizSubmission, conceptArr)
- * => merges quiz question concepts with subchapter concepts
- */
-function buildConceptStats(quizSubmission, conceptArr) {
-  const countMap = {};
-  quizSubmission.forEach((q) => {
-    const cName = q.conceptName || "UnknownConcept";
-    if (!countMap[cName]) {
-      countMap[cName] = { correct: 0, total: 0 };
-    }
-    countMap[cName].total++;
-    if (q.score && parseFloat(q.score) >= 1) {
-      countMap[cName].correct++;
-    }
-  });
-
-  const conceptNamesSet = new Set(conceptArr.map((c) => c.name));
-  if (countMap["UnknownConcept"]) {
-    conceptNamesSet.add("UnknownConcept");
-  }
-
-  const statsArray = [];
-  conceptNamesSet.forEach((cName) => {
-    const rec = countMap[cName] || { correct: 0, total: 0 };
-    const ratio = rec.total > 0 ? rec.correct / rec.total : 0;
-    let passOrFail = "FAIL";
-    if (rec.total === 0) {
-      passOrFail = "NOT_TESTED";
-    } else if (ratio === 1.0) {
-      passOrFail = "PASS";
-    }
-    statsArray.push({
-      conceptName: cName,
-      correct: rec.correct,
-      total: rec.total,
-      ratio,
-      passOrFail,
-    });
-  });
-  return statsArray;
-}
-
-function computePassCount(allAttemptsConceptStats) {
-  if (!Array.isArray(allAttemptsConceptStats)) return 0;
-  const passedSet = new Set();
-  for (const attempt of allAttemptsConceptStats) {
-    for (const cs of attempt.conceptStats || []) {
-      if (cs.passOrFail === "PASS") {
-        passedSet.add(cs.conceptName);
-      }
-    }
-  }
-  return passedSet.size;
-}
-
-// ------------------ Next Task Logic ------------------
-
-/**
- * getReadingTaskInfo
- * => if reading != "done", we show "READ"
- * => otherwise => no task
- */
-function getReadingTaskInfo(readingStatus) {
-  if (readingStatus === "done") {
-    return { hasTask: false, taskLabel: "" };
-  }
-  return { hasTask: true, taskLabel: "READ" };
-}
-
-/**
- * getQuizStageTaskInfo(stageObj, stageStatus)
- * => If stage is "done" => no tasks
- * => else => compute next quiz or revision step by sorting attempts
- */
-function getQuizStageTaskInfo(stageObj, stageStatus) {
-  if (!stageObj) {
-    // no aggregator data => default to QUIZ1
-    return { hasTask: true, taskLabel: "QUIZ1" };
-  }
-  if (stageStatus === "done") {
-    return { hasTask: false, taskLabel: "" };
-  }
-
-  const quizAttempts = stageObj.quizAttempts || [];
-  const revisionAttempts = stageObj.revisionAttempts || [];
-  const combined = [];
-
-  // combine quiz + revision attempts
-  quizAttempts.forEach((qa) => {
-    combined.push({
-      type: "quiz",
-      attemptNumber: qa.attemptNumber || 1,
-      timestamp: qa.timestamp || null,
-    });
-  });
-  revisionAttempts.forEach((ra) => {
-    combined.push({
-      type: "revision",
-      attemptNumber: ra.revisionNumber || 1,
-      timestamp: ra.timestamp || null,
-    });
-  });
-
-  // sort by timestamp => fallback to attemptNumber
-  combined.sort((a, b) => {
-    const aMs = toMillis(a.timestamp);
-    const bMs = toMillis(b.timestamp);
-    if (aMs !== bMs) return aMs - bMs;
-    return a.attemptNumber - b.attemptNumber;
-  });
-
-  if (combined.length === 0) {
-    return { hasTask: true, taskLabel: "QUIZ1" };
-  }
-
-  // find last step
-  const last = combined[combined.length - 1];
-  if (last.type === "quiz") {
-    // next => "REVISION{N}"
-    return { hasTask: true, taskLabel: `REVISION${last.attemptNumber}` };
-  }
-  // last.type === "revision" => next => QUIZ(N+1)
-  return { hasTask: true, taskLabel: `QUIZ${last.attemptNumber + 1}` };
-}
-
-function toMillis(ts) {
-  if (!ts) return 0;
-  if (typeof ts.seconds === "number") {
-    return ts.seconds * 1000;
-  }
-  if (ts instanceof Date) {
-    return ts.getTime();
-  }
-  if (ts._seconds) {
-    return ts._seconds * 1000;
-  }
-  return 0;
-}
-
-
-
-// GET /subchapter-status?userId=...&planId=...&subchapterId=...
 app.get("/subchapter-status", async (req, res) => {
   try {
     // 1) Parse query
@@ -4236,8 +3987,10 @@ app.get("/subchapter-status", async (req, res) => {
     const readingSummary = buildReadingSummary(readingObj);
     console.log("[/subchapter-status] readingSummary =>", readingSummary);
 
-    // 3) For each QUIZ_STAGE => gather quiz attempts, revision attempts, lumps, concept stats
-    const quizStages = {};
+    // 3) For each QUIZ_STAGE => gather aggregator data + status
+    const quizStagesData = {};    // full aggregator data (quizAttempts, etc.)
+    const quizStagesStatus = {};  // partial status (overall, masteryPct, etc.)
+
     console.log("[/subchapter-status] building quizStages for QUIZ_STAGES =>", QUIZ_STAGES);
 
     for (const stage of QUIZ_STAGES) {
@@ -4245,16 +3998,17 @@ app.get("/subchapter-status", async (req, res) => {
       const stageData = await gatherStageDataSingle(userId, planId, subchapterId, stage);
       console.log(`[/subchapter-status] stageData =>`, stageData);
 
-      const stageStatus = getStageStatus(stageData); // "done","in-progress","not-started"
+      const stageStatus = getStageStatus(stageData); 
       console.log(`[/subchapter-status] stageStatus => '${stage}':`, stageStatus);
 
-      quizStages[stage] = stageStatus;
+      quizStagesData[stage]   = stageData;   // store the raw aggregator object
+      quizStagesStatus[stage] = stageStatus; // store the simplified status
     }
-    console.log("[/subchapter-status] final quizStages =>", quizStages);
+    console.log("[/subchapter-status] final quizStagesStatus =>", quizStagesStatus);
 
     // 4) Combine reading + quiz stages => locked/unlocked logic + next tasks
     console.log("[/subchapter-status] calling buildTaskInfoV2...");
-    const taskInfo = buildTaskInfoV2(readingSummary, quizStages);
+    const taskInfo = buildTaskInfoV2(readingSummary, quizStagesData, quizStagesStatus);
     console.log("[/subchapter-status] final taskInfo =>", taskInfo);
 
     // 5) Return final
@@ -4263,8 +4017,8 @@ app.get("/subchapter-status", async (req, res) => {
       userId,
       planId,
       subchapterId,
-      readingSummary, // e.g. { overall: "done"/"in-progress"/"not-started", timeSpent, completionDate }
-      quizStages,     // e.g. { remember: { overall, masteryPct, ... }, ... }
+      readingSummary,  // e.g. { overall: "done", timeSpent, completionDate }
+      quizStages: quizStagesStatus, // or rename => e.g. "quizStagesStatus"
       taskInfo,       // e.g. array with Reading, Remember, Understand, Apply, Analyze
     });
   } catch (err) {
@@ -4273,13 +4027,143 @@ app.get("/subchapter-status", async (req, res) => {
   }
 });
 
-/**
- * buildReadingStatsSingle
- * -----------------------
- * In the cloud aggregator, you combined “reading_demo” (completions) + “readingSubActivity” (time lumps)
- * to produce { [subChId]: { totalTimeSpentMinutes, completionDate } }.
- * We'll do that once per user & plan, then only look up one subchapter from the result.
- */
+async function gatherStageDataSingle(userId, planId, subChId, stage) {
+  console.log("[gatherStageDataSingle] userId =", userId, 
+              "planId =", planId, 
+              "subChId =", subChId, 
+              "stage =", stage);
+
+  const dbRef = admin.firestore();
+
+  // 1) Quizzes
+  console.log("[gatherStageDataSingle] => Querying 'quizzes_demo' collection...");
+  const quizSnap = await dbRef
+    .collection("quizzes_demo")
+    .where("userId", "==", userId)
+    .where("planId", "==", planId)
+    .where("subchapterId", "==", subChId)
+    .where("quizType", "==", stage)
+    .get();
+  console.log("[gatherStageDataSingle] quizSnap.size =", quizSnap.size);
+
+  const quizAttempts = [];
+  quizSnap.forEach((docSnap) => {
+    const d = docSnap.data();
+    console.log("[gatherStageDataSingle] quiz doc =>", docSnap.id, d);
+    quizAttempts.push({
+      attemptNumber: d.attemptNumber || 1,
+      score: d.score || 0,
+      quizSubmission: d.quizSubmission || [],
+      timestamp: d.timestamp || null,
+    });
+  });
+
+  // 2) Revisions
+  console.log("[gatherStageDataSingle] => Querying 'revisions_demo' collection...");
+  const revSnap = await dbRef
+    .collection("revisions_demo")
+    .where("userId", "==", userId)
+    .where("planId", "==", planId)
+    .where("subchapterId", "==", subChId)
+    .where("revisionType", "==", stage)
+    .get();
+  console.log("[gatherStageDataSingle] revSnap.size =", revSnap.size);
+
+  const revisionAttempts = [];
+  revSnap.forEach((docSnap) => {
+    const d = docSnap.data();
+    console.log("[gatherStageDataSingle] revision doc =>", docSnap.id, d);
+    revisionAttempts.push({
+      revisionNumber: d.revisionNumber || 1,
+      timestamp: d.timestamp || null,
+    });
+  });
+
+  // 3) lumps => quizTimeSubActivity + reviseTimeSubActivity
+  let totalSeconds = 0;
+
+  // quizTimeSubActivity
+  console.log("[gatherStageDataSingle] => Querying 'quizTimeSubActivity'...");
+  const quizTimeSnap = await dbRef
+    .collection("quizTimeSubActivity")
+    .where("userId", "==", userId)
+    .where("planId", "==", planId)
+    .where("subChapterId", "==", subChId)
+    .where("quizStage", "==", stage)
+    .get();
+  console.log("[gatherStageDataSingle] quizTimeSnap.size =", quizTimeSnap.size);
+
+  quizTimeSnap.forEach((docSnap) => {
+    const docData = docSnap.data();
+    console.log("[gatherStageDataSingle] quizTime doc =>", docSnap.id, docData);
+    totalSeconds += docData.totalSeconds || 0;
+  });
+
+  // reviseTimeSubActivity
+  console.log("[gatherStageDataSingle] => Querying 'reviseTimeSubActivity'...");
+  const reviseTimeSnap = await dbRef
+    .collection("reviseTimeSubActivity")
+    .where("userId", "==", userId)
+    .where("planId", "==", planId)
+    .where("subChapterId", "==", subChId)
+    .where("quizStage", "==", stage)
+    .get();
+  console.log("[gatherStageDataSingle] reviseTimeSnap.size =", reviseTimeSnap.size);
+
+  reviseTimeSnap.forEach((docSnap) => {
+    const docData = docSnap.data();
+    console.log("[gatherStageDataSingle] reviseTime doc =>", docSnap.id, docData);
+    totalSeconds += docData.totalSeconds || 0;
+  });
+
+  console.log("[gatherStageDataSingle] totalSeconds after lumps =>", totalSeconds);
+
+  // 4) subchapterConcepts => find concept docs for this subchapter
+  console.log("[gatherStageDataSingle] => Querying 'subchapterConcepts'...");
+  const conceptSnap = await dbRef
+    .collection("subchapterConcepts")
+    .where("subChapterId", "==", subChId)
+    .get();
+
+  console.log("[gatherStageDataSingle] conceptSnap.size =", conceptSnap.size);
+
+  let totalConceptCount = 0;
+  const conceptArr = [];
+  conceptSnap.forEach((cDoc) => {
+    const cData = cDoc.data();
+    console.log("[gatherStageDataSingle] concept doc =>", cDoc.id, cData);
+    const name = cData.name || "UnnamedConcept";
+    conceptArr.push({ name });
+  });
+  totalConceptCount = conceptArr.length;
+  console.log(
+    "[gatherStageDataSingle] conceptArr =>",
+    conceptArr,
+    "totalConceptCount =>",
+    totalConceptCount
+  );
+
+  // 5) Build concept stats => same approach as aggregator
+  const allAttemptsConceptStats = buildAllAttemptsConceptStats(quizAttempts, conceptArr);
+  console.log(
+    "[gatherStageDataSingle] allAttemptsConceptStats =>",
+    JSON.stringify(allAttemptsConceptStats, null, 2)
+  );
+
+  // Return aggregator-like object
+  const result = {
+    quizAttempts,
+    revisionAttempts,
+    totalSeconds,
+    totalConceptCount,
+    allAttemptsConceptStats,
+  };
+  console.log("[gatherStageDataSingle] final =>", result);
+
+  return result;
+}
+
+
 async function buildReadingStatsSingle(userId, planId) {
   const result = {};
 
@@ -4344,155 +4228,33 @@ async function buildReadingStatsSingle(userId, planId) {
   return result;
 }
 
-/**
- * gatherStageDataSingle
- * ---------------------
- * Just for 1 subchapter + 1 stage. We gather:
- *  - quizzes_demo => quiz attempts
- *  - revisions_demo => revision attempts
- *  - quizTimeSubActivity => lumps
- *  - reviseTimeSubActivity => lumps
- *  - subchapterConcepts_demo => concept list
- * Then build the same stage object that the cloud aggregator uses, e.g.:
- * {
- *   quizAttempts,
- *   revisionAttempts,
- *   totalSeconds,
- *   totalConceptCount,
- *   allAttemptsConceptStats
- * }
- */
+/*********************************************
+ * buildReadingSummary
+ * => merges totalTimeSpentMinutes + completionDate => overall=done/in-progress
+ *********************************************/
+function buildReadingSummary(readObj) {
+  if (!readObj) {
+    return { overall: "not-started", timeSpent: 0, completionDate: null };
+  }
+  const { totalTimeSpentMinutes, completionDate } = readObj;
+  let overall = "not-started";
 
-async function gatherStageDataSingle(userId, planId, subChId, stage) {
-  console.log("[gatherStageDataSingle] userId =", userId, 
-              "planId =", planId, 
-              "subChId =", subChId, 
-              "stage =", stage);
-
-  const dbRef = admin.firestore();
-
-  // 1) Quizzes
-  console.log("[gatherStageDataSingle] => Querying quizzes_demo...");
-  const quizSnap = await dbRef
-    .collection("quizzes_demo")
-    .where("userId", "==", userId)
-    .where("planId", "==", planId)
-    .where("subchapterId", "==", subChId)
-    .where("quizType", "==", stage)
-    .get();
-  console.log("[gatherStageDataSingle] quizSnap.size =", quizSnap.size);
-
-  const quizAttempts = [];
-  quizSnap.forEach((doc) => {
-    console.log("[gatherStageDataSingle] quiz doc =>", doc.id, doc.data());
-    const d = doc.data();
-    quizAttempts.push({
-      attemptNumber: d.attemptNumber || 1,
-      score: d.score || 0,
-      quizSubmission: d.quizSubmission || [],
-      timestamp: d.timestamp || null,
-    });
-  });
-
-  // 2) Revisions
-  console.log("[gatherStageDataSingle] => Querying revisions_demo...");
-  const revSnap = await dbRef
-    .collection("revisions_demo")
-    .where("userId", "==", userId)
-    .where("planId", "==", planId)
-    .where("subchapterId", "==", subChId)
-    .where("revisionType", "==", stage)
-    .get();
-  console.log("[gatherStageDataSingle] revSnap.size =", revSnap.size);
-
-  const revisionAttempts = [];
-  revSnap.forEach((doc) => {
-    console.log("[gatherStageDataSingle] revision doc =>", doc.id, doc.data());
-    const d = doc.data();
-    revisionAttempts.push({
-      revisionNumber: d.revisionNumber || 1,
-      timestamp: d.timestamp || null,
-    });
-  });
-
-  // 3) lumps => quizTimeSubActivity + reviseTimeSubActivity
-  let totalSeconds = 0;
-
-  // quizTimeSubActivity
-  console.log("[gatherStageDataSingle] => Querying quizTimeSubActivity...");
-  const quizTimeSnap = await dbRef
-    .collection("quizTimeSubActivity")
-    .where("userId", "==", userId)
-    .where("planId", "==", planId)
-    .where("subChapterId", "==", subChId)
-    .where("quizStage", "==", stage)
-    .get();
-  console.log("[gatherStageDataSingle] quizTimeSnap.size =", quizTimeSnap.size);
-
-  quizTimeSnap.forEach((docSnap) => {
-    const docData = docSnap.data();
-    console.log("[gatherStageDataSingle] quizTime doc =>", docSnap.id, docData);
-    totalSeconds += docData.totalSeconds || 0;
-  });
-
-  // reviseTimeSubActivity
-  console.log("[gatherStageDataSingle] => Querying reviseTimeSubActivity...");
-  const reviseTimeSnap = await dbRef
-    .collection("reviseTimeSubActivity")
-    .where("userId", "==", userId)
-    .where("planId", "==", planId)
-    .where("subChapterId", "==", subChId)
-    .where("quizStage", "==", stage)
-    .get();
-  console.log("[gatherStageDataSingle] reviseTimeSnap.size =", reviseTimeSnap.size);
-
-  reviseTimeSnap.forEach((docSnap) => {
-    const docData = docSnap.data();
-    console.log("[gatherStageDataSingle] reviseTime doc =>", docSnap.id, docData);
-    totalSeconds += docData.totalSeconds || 0;
-  });
-
-  console.log("[gatherStageDataSingle] totalSeconds after lumps =>", totalSeconds);
-
-  // 4) subchapterConcepts => find concept docs for this subchapter
-  console.log("[gatherStageDataSingle] => Querying subchapterConcepts");
-  const conceptSnap = await dbRef
-    .collection("subchapterConcepts")
-    .where("subChapterId", "==", subChId)
-    .get();
-
-  console.log("[gatherStageDataSingle] conceptSnap.size =", conceptSnap.size);
-
-  let totalConceptCount = 0;
-  const conceptArr = [];
-  conceptSnap.forEach((cDoc) => {
-    const cData = cDoc.data();
-    console.log("[gatherStageDataSingle] concept doc =>", cDoc.id, cData);
-    const name = cData.name || "UnnamedConcept";
-    conceptArr.push({ name });
-  });
-  totalConceptCount = conceptArr.length;
-  console.log("[gatherStageDataSingle] conceptArr =>", conceptArr, 
-              " totalConceptCount =>", totalConceptCount);
-
-  // 5) Build concept stats => same approach as aggregator
-  const allAttemptsConceptStats = buildAllAttemptsConceptStats(quizAttempts, conceptArr);
-  console.log("[gatherStageDataSingle] allAttemptsConceptStats =>", 
-              JSON.stringify(allAttemptsConceptStats, null, 2));
-
-  // Return aggregator-like object
-  const result = {
-    quizAttempts,
-    revisionAttempts,
-    totalSeconds,
-    totalConceptCount,
-    allAttemptsConceptStats,
+  if (completionDate) {
+    overall = "done";
+  } else if ((totalTimeSpentMinutes || 0) > 0) {
+    overall = "in-progress";
+  }
+  return {
+    overall,
+    timeSpent: totalTimeSpentMinutes || 0,
+    completionDate: completionDate || null,
   };
-  console.log("[gatherStageDataSingle] final =>", result);
-  return result;
 }
 
-/** getStageStatus => "done"|"in-progress"|"not-started" exactly like in cloud aggregator. */
+/*********************************************
+ * getStageStatus (OBJECT-based)
+ * => returns { overall: "...", masteryPct: number, timeSpentMinutes: number }
+ *********************************************/
 function getStageStatus(stageObj) {
   if (!stageObj) {
     return { overall: "not-started", masteryPct: 0, timeSpentMinutes: 0 };
@@ -4500,11 +4262,12 @@ function getStageStatus(stageObj) {
   const totalConcepts = stageObj.totalConceptCount || 0;
   const passCount = computePassCount(stageObj.allAttemptsConceptStats);
   const timeSpentMinutes = (stageObj.totalSeconds || 0) / 60;
+
   let overall = "not-started";
   let masteryPct = 0;
 
   if (totalConcepts === 0) {
-    // If no concepts, but user has attempts or lumps => "in-progress"
+    // If user has lumps or attempts => "in-progress"
     if (
       stageObj.quizAttempts.length > 0 ||
       stageObj.revisionAttempts.length > 0 ||
@@ -4513,13 +4276,14 @@ function getStageStatus(stageObj) {
       overall = "in-progress";
     }
   } else {
-    // passCount >= total => done, else in-progress if user has partial
+    // if passCount >= total => done
     masteryPct = (passCount / totalConcepts) * 100;
     if (passCount >= totalConcepts) {
       overall = "done";
     } else if (
       passCount > 0 ||
       stageObj.quizAttempts.length > 0 ||
+      stageObj.revisionAttempts.length > 0 ||
       timeSpentMinutes > 0
     ) {
       overall = "in-progress";
@@ -4533,30 +4297,108 @@ function getStageStatus(stageObj) {
   };
 }
 
-/** buildTaskInfo => 5-row chain: Reading, Remember, Understand, Apply, Analyze. 
- *  We do the "locked" logic => if reading !== done => remember locked, if remember!==done => understand locked, etc.
- *  Then next tasks, active stage, etc. 
- */
-function buildTaskInfoV2(readingSummary, quizStages) {
-  // 1) locked logic => if reading not done => remember locked; if remember not done => understand locked, etc.
+/*********************************************
+ * computePassCount(allAttemptsConceptStats)
+ * => how many *unique* concepts were passed
+ *********************************************/
+function computePassCount(allAttemptsConceptStats) {
+  if (!Array.isArray(allAttemptsConceptStats)) return 0;
+  const passedSet = new Set();
+  for (const attempt of allAttemptsConceptStats) {
+    for (const cs of attempt.conceptStats || []) {
+      if (cs.passOrFail === "PASS") {
+        passedSet.add(cs.conceptName);
+      }
+    }
+  }
+  return passedSet.size;
+}
+
+/*********************************************
+ * buildAllAttemptsConceptStats(quizAttempts, conceptArr)
+ * => array of { attemptNumber, score, conceptStats }
+ *********************************************/
+function buildAllAttemptsConceptStats(quizAttempts, conceptArr) {
+  if (!quizAttempts.length || !conceptArr.length) return [];
+  return quizAttempts.map((attempt) => {
+    const stats = buildConceptStats(attempt.quizSubmission || [], conceptArr);
+    return {
+      attemptNumber: attempt.attemptNumber,
+      score: attempt.score,
+      conceptStats: stats,
+    };
+  });
+}
+
+/*********************************************
+ * buildConceptStats(quizSubmission, conceptArr)
+ * => merges user’s quizSubmission with known conceptArr
+ *********************************************/
+function buildConceptStats(quizSubmission, conceptArr) {
+  const countMap = {};
+  quizSubmission.forEach((q) => {
+    const cName = q.conceptName || "UnknownConcept";
+    if (!countMap[cName]) {
+      countMap[cName] = { correct: 0, total: 0 };
+    }
+    countMap[cName].total++;
+    if (q.score && parseFloat(q.score) >= 1) {
+      countMap[cName].correct++;
+    }
+  });
+
+  const conceptNamesSet = new Set(conceptArr.map((c) => c.name));
+  if (countMap["UnknownConcept"]) {
+    conceptNamesSet.add("UnknownConcept");
+  }
+
+  const statsArray = [];
+  conceptNamesSet.forEach((cName) => {
+    const rec = countMap[cName] || { correct: 0, total: 0 };
+    const ratio = rec.total > 0 ? rec.correct / rec.total : 0;
+    let passOrFail = "FAIL";
+    if (rec.total === 0) {
+      passOrFail = "NOT_TESTED";
+    } else if (ratio === 1.0) {
+      passOrFail = "PASS";
+    }
+    statsArray.push({
+      conceptName: cName,
+      correct: rec.correct,
+      total: rec.total,
+      ratio,
+      passOrFail,
+    });
+  });
+  return statsArray;
+}
+
+/*********************************************
+ * buildTaskInfoV2
+ * => merges reading + quiz stages => locked/unlocked + next tasks
+ * Key difference: we pass *both* the raw aggregator data (quizStagesData)
+ * and the short status objects (quizStagesStatus).
+ *********************************************/
+function buildTaskInfoV2(readingSummary, quizStagesData, quizStagesStatus) {
+  // locked logic => if reading not done => remember locked, etc.
   const rememberLocked    = (readingSummary.overall !== "done");
-  const understandLocked  = (quizStages.remember.overall    !== "done");
-  const applyLocked       = (quizStages.understand.overall  !== "done");
-  const analyzeLocked     = (quizStages.apply.overall       !== "done");
+  const understandLocked  = (quizStagesStatus.remember.overall    !== "done");
+  const applyLocked       = (quizStagesStatus.understand.overall  !== "done");
+  const analyzeLocked     = (quizStagesStatus.apply.overall       !== "done");
 
-  // 2) next tasks
-  const readingTask    = getReadingTaskInfo(readingSummary); // either "READ" or none
-  const rememberTask   = getQuizStageTaskInfo(quizStages.remember, quizStages.remember.overall);
-  const understandTask = getQuizStageTaskInfo(quizStages.understand, quizStages.understand.overall);
-  const applyTask      = getQuizStageTaskInfo(quizStages.apply, quizStages.apply.overall);
-  const analyzeTask    = getQuizStageTaskInfo(quizStages.analyze, quizStages.analyze.overall);
+  // next tasks
+  const readingTask    = getReadingTaskInfo(readingSummary);
+  const rememberTask   = getQuizStageTaskInfo(quizStagesData.remember, quizStagesStatus.remember);
+  const understandTask = getQuizStageTaskInfo(quizStagesData.understand, quizStagesStatus.understand);
+  const applyTask      = getQuizStageTaskInfo(quizStagesData.apply, quizStagesStatus.apply);
+  const analyzeTask    = getQuizStageTaskInfo(quizStagesData.analyze, quizStagesStatus.analyze);
 
-  // 3) active logic => whichever is first not done
+  // active logic => first not done
   const readingDone      = (readingSummary.overall === "done");
-  const rememberDone     = (quizStages.remember.overall === "done");
-  const understandDone   = (quizStages.understand.overall === "done");
-  const applyDone        = (quizStages.apply.overall === "done");
-  const analyzeDone      = (quizStages.analyze.overall === "done");
+  const rememberDone     = (quizStagesStatus.remember.overall === "done");
+  const understandDone   = (quizStagesStatus.understand.overall === "done");
+  const applyDone        = (quizStagesStatus.apply.overall === "done");
+  const analyzeDone      = (quizStagesStatus.analyze.overall === "done");
 
   const readingActive    = !readingDone;
   const rememberActive   = readingDone && !rememberDone;
@@ -4576,7 +4418,7 @@ function buildTaskInfoV2(readingSummary, quizStages) {
     {
       stageLabel: "Remember",
       locked: rememberLocked,
-      status: quizStages.remember.overall,
+      status: quizStagesStatus.remember.overall,
       nextTaskLabel: rememberTask.taskLabel,
       hasTask: rememberTask.hasTask,
       isActive: rememberActive,
@@ -4584,7 +4426,7 @@ function buildTaskInfoV2(readingSummary, quizStages) {
     {
       stageLabel: "Understand",
       locked: understandLocked,
-      status: quizStages.understand.overall,
+      status: quizStagesStatus.understand.overall,
       nextTaskLabel: understandTask.taskLabel,
       hasTask: understandTask.hasTask,
       isActive: understandActive,
@@ -4592,7 +4434,7 @@ function buildTaskInfoV2(readingSummary, quizStages) {
     {
       stageLabel: "Apply",
       locked: applyLocked,
-      status: quizStages.apply.overall,
+      status: quizStagesStatus.apply.overall,
       nextTaskLabel: applyTask.taskLabel,
       hasTask: applyTask.hasTask,
       isActive: applyActive,
@@ -4600,7 +4442,7 @@ function buildTaskInfoV2(readingSummary, quizStages) {
     {
       stageLabel: "Analyze",
       locked: analyzeLocked,
-      status: quizStages.analyze.overall,
+      status: quizStagesStatus.analyze.overall,
       nextTaskLabel: analyzeTask.taskLabel,
       hasTask: analyzeTask.hasTask,
       isActive: analyzeActive,
@@ -4608,41 +4450,41 @@ function buildTaskInfoV2(readingSummary, quizStages) {
   ];
 }
 
-/** Same logic as your aggregator “buildReadingSummary” => done if completionDate != null, else in-progress if time>0. */
-function buildReadingSummary(readObj) {
-  if (!readObj) {
-    return { overall: "not-started", timeSpent: 0, completionDate: null };
-  }
-  const { totalTimeSpentMinutes, completionDate } = readObj;
-  let overall = "not-started";
-  if (completionDate) {
-    overall = "done";
-  } else if ((totalTimeSpentMinutes || 0) > 0) {
-    overall = "in-progress";
-  }
-  return {
-    overall,
-    timeSpent: totalTimeSpentMinutes || 0,
-    completionDate: completionDate || null,
-  };
-}
-
-/** 
- * getStageStatus => in the cloud aggregator you had a function 
- *   similar to "if passCount >= totalConcepts => done else if passCount>0 or totalSeconds>0 => in-progress else not-started"
- * 
- * For single subchapter, we do the same in getStageStatus(...) above.
- * 
- * getQuizStageTaskInfo => same logic => parse attempts => next => QUIZ1 or REVISION...
- */
-function getQuizStageTaskInfo(stageObj, stageOverall) {
-  if (!stageObj || stageOverall === "done") {
+/*********************************************
+ * getReadingTaskInfo
+ *********************************************/
+function getReadingTaskInfo(readingSummary) {
+  if (readingSummary.overall === "done") {
     return { hasTask: false, taskLabel: "" };
   }
-  // We adapt the combined attempts logic from the aggregator
-  const quizArr = stageObj.quizAttempts || [];
-  const revArr = stageObj.revisionAttempts || [];
+  return { hasTask: true, taskLabel: "READ" };
+}
+
+/*********************************************
+ * getQuizStageTaskInfo
+ * => EXACT logic from "ProgressView":
+ *    if last doc is quiz => next => REVISION#
+ *    if last doc is revision => next => QUIZ(N+1)
+ *********************************************/
+function getQuizStageTaskInfo(stageData, stageStatus) {
+  if (!stageData) {
+    // If we have no aggregator data at all:
+    if (stageStatus.overall === "done") {
+      return { hasTask: false, taskLabel: "" };
+    }
+    // else => "QUIZ1"
+    return { hasTask: true, taskLabel: "QUIZ1" };
+  }
+  // If stage is "done" => no next
+  if (stageStatus.overall === "done") {
+    return { hasTask: false, taskLabel: "" };
+  }
+
+  // Combine quiz + revision
+  const quizArr = stageData.quizAttempts || [];
+  const revArr  = stageData.revisionAttempts || [];
   const combined = [];
+
   quizArr.forEach((q) => {
     combined.push({
       type: "quiz",
@@ -4657,90 +4499,32 @@ function getQuizStageTaskInfo(stageObj, stageOverall) {
       timestamp: toMillis(r.timestamp),
     });
   });
-  combined.sort((a, b) => (a.timestamp - b.timestamp) || (a.attemptNumber - b.attemptNumber));
 
-  if (combined.length === 0) {
+  // sort => last is most recent
+  combined.sort((a, b) => {
+    const diff = a.timestamp - b.timestamp;
+    if (diff !== 0) return diff;
+    return (a.attemptNumber - b.attemptNumber);
+  });
+
+  if (!combined.length) {
+    // no attempts => QUIZ1
     return { hasTask: true, taskLabel: "QUIZ1" };
   }
+
   const last = combined[combined.length - 1];
   if (last.type === "quiz") {
+    // next => revision for same attempt
     return { hasTask: true, taskLabel: `REVISION${last.attemptNumber}` };
+  } else {
+    // last.type = "revision"
+    return { hasTask: true, taskLabel: `QUIZ${last.attemptNumber + 1}` };
   }
-  // last.type === "revision"
-  return { hasTask: true, taskLabel: `QUIZ${last.attemptNumber + 1}` };
 }
 
-/** 
- * computePassCount => just like in aggregator 
- */
-function computePassCount(allAttemptsConceptStats) {
-  if (!Array.isArray(allAttemptsConceptStats)) return 0;
-  const passedSet = new Set();
-  for (const attempt of allAttemptsConceptStats) {
-    for (const cs of attempt.conceptStats || []) {
-      if (cs.passOrFail === "PASS") {
-        passedSet.add(cs.conceptName);
-      }
-    }
-  }
-  return passedSet.size;
-}
-
-/**
- * buildAllAttemptsConceptStats => merges quiz attempts with subchapter concepts
- */
-function buildAllAttemptsConceptStats(quizAttempts, conceptArr) {
-  if (!quizAttempts.length || !conceptArr.length) return [];
-  return quizAttempts.map((attempt) => {
-    const stats = buildConceptStats(attempt.quizSubmission || [], conceptArr);
-    return {
-      attemptNumber: attempt.attemptNumber,
-      score: attempt.score,
-      conceptStats: stats,
-    };
-  });
-}
-
-/**
- * buildConceptStats => for a single attempt
- */
-function buildConceptStats(quizSubmission, conceptArr) {
-  const countMap = {};
-  quizSubmission.forEach((q) => {
-    const cName = q.conceptName || "UnknownConcept";
-    if (!countMap[cName]) {
-      countMap[cName] = { correct: 0, total: 0 };
-    }
-    countMap[cName].total++;
-    if (q.score && parseFloat(q.score) >= 1) {
-      countMap[cName].correct++;
-    }
-  });
-  const conceptNamesSet = new Set(conceptArr.map((c) => c.name));
-  if (countMap["UnknownConcept"]) {
-    conceptNamesSet.add("UnknownConcept");
-  }
-
-  const statsArray = [];
-  conceptNamesSet.forEach((cName) => {
-    const rec = countMap[cName] || { correct: 0, total: 0 };
-    const ratio = rec.total > 0 ? (rec.correct / rec.total) : 0;
-    let passOrFail = "FAIL";
-    if (rec.total === 0) passOrFail = "NOT_TESTED";
-    else if (ratio === 1.0) passOrFail = "PASS";
-
-    statsArray.push({
-      conceptName: cName,
-      correct: rec.correct,
-      total: rec.total,
-      ratio,
-      passOrFail,
-    });
-  });
-  return statsArray;
-}
-
-/** convert Firestore Timestamp => JS Date. */
+/*********************************************
+ * convertToDate / toMillis
+ *********************************************/
 function convertToDate(ts) {
   if (!ts) return null;
   if (typeof ts.toDate === "function") {
@@ -4751,7 +4535,6 @@ function convertToDate(ts) {
   }
   return null;
 }
-
 function toMillis(ts) {
   if (!ts) return 0;
   if (typeof ts.seconds === "number") return ts.seconds * 1000;
@@ -4759,7 +4542,6 @@ function toMillis(ts) {
   if (ts instanceof Date) return ts.getTime();
   return 0;
 }
-
 
 
 /**
@@ -5049,6 +4831,79 @@ app.post("/api/replicateActivity", async (req, res) => {
   }
 });
 
+
+app.get("/api/getActivityTime", async (req, res) => {
+  try {
+    const { activityId, type } = req.query;
+    if (!activityId) {
+      return res.status(400).json({ error: "Missing activityId" });
+    }
+    if (!type) {
+      return res.status(400).json({ error: "Missing type (read|quiz)" });
+    }
+
+    let totalTime = 0;
+
+    if (type === "read") {
+      // 1) Only read from readingSubActivity
+      const snap = await db
+        .collection("readingSubActivity")
+        .where("activityId", "==", activityId)
+        .get();
+      
+      let sum = 0;
+      snap.forEach((doc) => {
+        const data = doc.data();
+        // e.g. data.totalSeconds 
+        if (data.totalSeconds) {
+          sum += data.totalSeconds;
+        }
+      });
+      totalTime = sum;
+
+    } else if (type === "quiz") {
+      // 2) For quiz => sum from quizTimeSubActivity + reviseTimeSubActivity
+
+      // A) quizTimeSubActivity
+      let quizTimeSum = 0;
+      const quizSnap = await db
+        .collection("quizTimeSubActivity")
+        .where("activityId", "==", activityId)
+        .get();
+      quizSnap.forEach((doc) => {
+        const data = doc.data();
+        if (data.totalSeconds) {
+          quizTimeSum += data.totalSeconds;
+        }
+      });
+
+      // B) reviseTimeSubActivity
+      let reviseTimeSum = 0;
+      const reviseSnap = await db
+        .collection("reviseTimeSubActivity")
+        .where("activityId", "==", activityId)
+        .get();
+      reviseSnap.forEach((doc) => {
+        const data = doc.data();
+        if (data.totalSeconds) {
+          reviseTimeSum += data.totalSeconds;
+        }
+      });
+
+      totalTime = quizTimeSum + reviseTimeSum;
+
+    } else {
+      // If you have other types, handle them or return 400
+      return res.status(400).json({ error: "Unsupported type." });
+    }
+
+    // Finally return the sum
+    return res.json({ totalTime });
+  } catch (err) {
+    console.error("[GET] /api/getActivityTime => error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 
 const PORT = process.env.PORT || 3001;
