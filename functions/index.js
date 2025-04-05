@@ -6060,28 +6060,73 @@ function convertToDate(ts) {
  * => "done","in-progress","not-started"
  * If totalConceptCount=0 but attempts/timeSpent>0 => "in-progress"
  */
-function getStageStatus(stageObj) {
-  if (!stageObj) return "not-started";
-  const totalConcepts = stageObj.totalConceptCount || 0;
+function getStageStatus(stageData) {
+  console.log("[getStageStatus] stageData =>", JSON.stringify(stageData, null, 2));
+  
+  // If no quiz attempts => "not-started"
+  if (!stageData.quizAttempts || stageData.quizAttempts.length === 0) {
+    console.log("[getStageStatus] => no quiz attempts => overall: 'not-started'");
+    return {
+      overall: "not-started",
+      masteryPct: 0,
+      timeSpentMinutes: (stageData.totalSeconds || 0) / 60
+    };
+  }
 
-  if (totalConcepts === 0) {
-    if (stageObj.quizAttempts.length > 0 || stageObj.totalSeconds > 0) {
-      return "in-progress";
+  // Find highest attemptNumber
+  let lastQuiz = null;
+  stageData.quizAttempts.forEach((qa) => {
+    if (!lastQuiz || (qa.attemptNumber || 0) > (lastQuiz.attemptNumber || 0)) {
+      lastQuiz = qa;
     }
-    return "not-started";
+  });
+  console.log("[getStageStatus] => lastQuiz attempt =>", lastQuiz);
+
+  // Convert score
+  let numericScore = 0;
+  if (typeof lastQuiz.score === "string" && lastQuiz.score.endsWith("%")) {
+    numericScore = parseFloat(lastQuiz.score);
+  } else {
+    numericScore = parseFloat(lastQuiz.score || "0");
   }
 
-  const passCount = computePassCount(stageObj.allAttemptsConceptStats);
-  if (passCount >= totalConcepts) {
-    return "done";
-  } else if (
-    passCount > 0 ||
-    stageObj.totalSeconds > 0 ||
-    stageObj.quizAttempts.length > 0
-  ) {
-    return "in-progress";
+  // Possibly your aggregator expects pass=100%?
+  const passThreshold = 100;
+  const passedQuiz = numericScore >= passThreshold;
+
+  // If user hasn't passed => in-progress
+  if (!passedQuiz) {
+    console.log("[getStageStatus] => last quiz not passed => 'in-progress'");
+    return {
+      overall: "in-progress",
+      masteryPct: 0, // or numericScore?
+      timeSpentMinutes: (stageData.totalSeconds || 0) / 60
+    };
   }
-  return "not-started";
+
+  // If user has 100%, maybe aggregator checks for matching revision?
+  const neededRevisionNum = lastQuiz.attemptNumber;
+  const foundMatchingRev = (stageData.revisionAttempts || []).some((rev) => rev.revisionNumber === neededRevisionNum);
+
+  console.log("[getStageStatus] => lastQuiz attemptNumber:", neededRevisionNum, "foundMatchingRev?", foundMatchingRev);
+
+  if (!foundMatchingRev) {
+    console.log("[getStageStatus] => missing revision for last attempt => 'in-progress'");
+    return {
+      overall: "in-progress",
+      masteryPct: numericScore,
+      timeSpentMinutes: (stageData.totalSeconds || 0) / 60,
+      nextTask: `REVISION${neededRevisionNum}`
+    };
+  }
+
+  // Else => done
+  console.log("[getStageStatus] => final => 'done'");
+  return {
+    overall: "done",
+    masteryPct: numericScore,
+    timeSpentMinutes: (stageData.totalSeconds || 0) / 60
+  };
 }
 
 /**

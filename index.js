@@ -3248,7 +3248,7 @@ app.post("/api/submitRevision", async (req, res) => {
   console.log("=== /api/submitRevision Request Body ===", req.body);
 
   try {
-    const { userId, subchapterId, revisionType, revisionNumber, planId } = req.body;
+    const { userId, subchapterId, revisionType, revisionNumber, planId, activityId } = req.body;
     console.log("Parsed fields =>", { userId, subchapterId, revisionType, revisionNumber, planId });
 
     if (!userId || !subchapterId || !revisionType || !revisionNumber) {
@@ -3258,6 +3258,7 @@ app.post("/api/submitRevision", async (req, res) => {
     const db = admin.firestore();
     const docRef = await db.collection("revisions_demo").add({
       userId,
+      activityId,
       subchapterId,
       revisionType,
       revisionNumber,
@@ -3351,6 +3352,7 @@ app.post("/api/submitQuiz", async (req, res) => {
     // 2) Destructure the fields, then log them
     const {
       userId,
+      activityId,
       subchapterId,
       quizType,
       quizSubmission,
@@ -3362,6 +3364,7 @@ app.post("/api/submitQuiz", async (req, res) => {
 
     console.log("[submitQuiz] Parsed fields =>", {
       userId,
+      activityId,
       subchapterId,
       quizType,
       quizSubmission,
@@ -3387,6 +3390,7 @@ app.post("/api/submitQuiz", async (req, res) => {
 
     const docRef = await db.collection("quizzes_demo").add({
       userId,
+      activityId,
       subchapterId,
       quizType,
       quizSubmission,
@@ -3498,6 +3502,7 @@ app.post("/api/submitReading", async (req, res) => {
   try {
     const {
       userId,
+      activityId,
       subChapterId,
       readingStartTime,
       readingEndTime,
@@ -3519,6 +3524,7 @@ app.post("/api/submitReading", async (req, res) => {
     // Create a doc in "reading_demo" (or any name you prefer)
     const docRef = await db.collection("reading_demo").add({
       userId,
+      activityId,
       subChapterId,
       readingStartTime: new Date(readingStartTime),
       readingEndTime: new Date(readingEndTime),
@@ -3641,7 +3647,7 @@ app.get("/api/getReadingTime", async (req, res) => {
 
 app.post("/api/incrementReadingTime", async (req, res) => {
   try {
-    const { userId, planId, subChapterId, increment } = req.body;
+    const { userId, planId, subChapterId, increment, activityId } = req.body;
     if (!userId || !planId || !subChapterId || typeof increment !== "number") {
       return res.status(400).json({ error: "Missing or invalid fields" });
     }
@@ -3660,6 +3666,7 @@ app.post("/api/incrementReadingTime", async (req, res) => {
         docRef,
         {
           userId,
+          activityId,
           planId,
           subChapterId,
           dateStr,
@@ -3710,6 +3717,7 @@ app.post("/api/incrementQuizTime", async (req, res) => {
   try {
     const {
       docId,
+      activityId,
       increment,
       userId,
       planId,
@@ -3742,6 +3750,7 @@ app.post("/api/incrementQuizTime", async (req, res) => {
         docRef,
         {
           userId,
+          activityId,
           planId,
           subChapterId: subChapterId || "",
           quizStage: quizStage || "",
@@ -3792,6 +3801,7 @@ app.post("/api/incrementReviseTime", async (req, res) => {
   try {
     const {
       docId,
+      activityId,
       increment,
       userId,
       planId,
@@ -3820,6 +3830,7 @@ app.post("/api/incrementReviseTime", async (req, res) => {
       // Merge in all fields (including revisionNumber)
       t.set(docRef, {
         userId,
+        activityId,
         planId,
         subChapterId: subChapterId || "",
         quizStage: quizStage || "",
@@ -4206,40 +4217,58 @@ app.get("/subchapter-status", async (req, res) => {
   try {
     // 1) Parse query
     const { userId, planId, subchapterId } = req.query;
+    console.log("[/subchapter-status] Incoming params =>", { userId, planId, subchapterId });
+
     if (!userId || !planId || !subchapterId) {
+      console.log("[/subchapter-status] Missing params => returning 400");
       return res.status(400).json({ error: "Missing userId, planId, or subchapterId" });
     }
 
     // 2) Build readingStats => merges reading_demo + readingSubActivity lumps
+    console.log("[/subchapter-status] calling buildReadingStatsSingle...");
     const readingStatsMap = await buildReadingStatsSingle(userId, planId);
-    // That returns something like { [subChId]: { totalTimeSpentMinutes, completionDate } }
+    console.log("[/subchapter-status] readingStatsMap =>", readingStatsMap);
 
     // If this subchapter isn’t in readingStatsMap => not-started
     const readingObj = readingStatsMap[subchapterId] || null;
+    console.log("[/subchapter-status] readingObj for subChapterId:", subchapterId, "=>", readingObj);
+
     const readingSummary = buildReadingSummary(readingObj);
+    console.log("[/subchapter-status] readingSummary =>", readingSummary);
 
     // 3) For each QUIZ_STAGE => gather quiz attempts, revision attempts, lumps, concept stats
     const quizStages = {};
+    console.log("[/subchapter-status] building quizStages for QUIZ_STAGES =>", QUIZ_STAGES);
+
     for (const stage of QUIZ_STAGES) {
+      console.log(`[/subchapter-status] gathering stageData for stage=${stage}`);
       const stageData = await gatherStageDataSingle(userId, planId, subchapterId, stage);
+      console.log(`[/subchapter-status] stageData =>`, stageData);
+
       const stageStatus = getStageStatus(stageData); // "done","in-progress","not-started"
+      console.log(`[/subchapter-status] stageStatus => '${stage}':`, stageStatus);
+
       quizStages[stage] = stageStatus;
     }
+    console.log("[/subchapter-status] final quizStages =>", quizStages);
 
     // 4) Combine reading + quiz stages => locked/unlocked logic + next tasks
+    console.log("[/subchapter-status] calling buildTaskInfoV2...");
     const taskInfo = buildTaskInfoV2(readingSummary, quizStages);
+    console.log("[/subchapter-status] final taskInfo =>", taskInfo);
 
     // 5) Return final
+    console.log("[/subchapter-status] returning success => subchapterId:", subchapterId);
     return res.json({
       userId,
       planId,
       subchapterId,
       readingSummary, // e.g. { overall: "done"/"in-progress"/"not-started", timeSpent, completionDate }
       quizStages,     // e.g. { remember: { overall, masteryPct, ... }, ... }
-      taskInfo,       // 5-row array for Reading, Remember, Understand, Apply, Analyze
+      taskInfo,       // e.g. array with Reading, Remember, Understand, Apply, Analyze
     });
   } catch (err) {
-    console.error("Error in /subchapter-status route:", err);
+    console.error("[/subchapter-status] error =>", err);
     res.status(500).json({ error: err.message });
   }
 });
