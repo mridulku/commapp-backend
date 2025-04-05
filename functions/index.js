@@ -3310,7 +3310,6 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     return res.status(204).send("");
   }
 
-  // For logging
   let logDetails = [];
 
   try {
@@ -3332,52 +3331,30 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     }
 
     const examId = req.query.examId || req.body.examId || "general";
-
-    // If no planId => aggregator might treat everything as "not started"
     const planId = req.query.planId || req.body.planId || "";
-
     const today = new Date();
     let defaultMaxDayCount = getDaysBetween(today, targetDate);
     if (defaultMaxDayCount < 0) defaultMaxDayCount = 0;
 
-    // -----------
-    // B) Overrides
-    // -----------
-    const maxDaysOverride =
-      req.body.maxDays !== undefined ? Number(req.body.maxDays) : null;
-    const wpmOverride =
-      req.body.wpm !== undefined ? Number(req.body.wpm) : null;
+    const maxDaysOverride = req.body.maxDays !== undefined ? Number(req.body.maxDays) : null;
+    const wpmOverride = req.body.wpm !== undefined ? Number(req.body.wpm) : null;
     const dailyReadingTimeOverride =
-      req.body.dailyReadingTime !== undefined
-        ? Number(req.body.dailyReadingTime)
-        : null;
-
-    const quizTimeOverride =
-      req.body.quizTime !== undefined ? Number(req.body.quizTime) : 5;
-
+      req.body.dailyReadingTime !== undefined ? Number(req.body.dailyReadingTime) : null;
+    const quizTimeOverride = req.body.quizTime !== undefined ? Number(req.body.quizTime) : 5;
     const level = req.body.planType || "none-basic";
 
-    // Book/chapter selection
-    const selectedBooks = Array.isArray(req.body.selectedBooks)
-      ? req.body.selectedBooks
-      : null;
-    const selectedChapters = Array.isArray(req.body.selectedChapters)
-      ? req.body.selectedChapters
-      : null;
+    const selectedBooks = Array.isArray(req.body.selectedBooks) ? req.body.selectedBooks : null;
+    const selectedChapters = Array.isArray(req.body.selectedChapters) ? req.body.selectedChapters : null;
     const selectedSubChapters = Array.isArray(req.body.selectedSubChapters)
       ? req.body.selectedSubChapters
       : null;
     const singleBookIdFromBody = req.body.bookId || "";
 
-    // Logging
     logDetails.push(`User ID: ${userId}`);
-    logDetails.push(`Plan ID (for aggregator): ${planId}`);
+    logDetails.push(`Plan ID: ${planId}`);
     logDetails.push(`Target Date: ${targetDateStr}`);
     logDetails.push(`Exam ID: ${examId}`);
     logDetails.push(`Plan Type: ${level}`);
-    logDetails.push(
-      `Overrides => maxDays: ${maxDaysOverride}, wpm: ${wpmOverride}, dailyReadingTime: ${dailyReadingTimeOverride}, quizTime: ${quizTimeOverride}`
-    );
 
     // ---------------------
     // C) Fetch Persona
@@ -3389,9 +3366,7 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
       .limit(1)
       .get();
     if (personaSnap.empty) {
-      return res
-        .status(404)
-        .json({ error: `No learner persona found for userId: ${userId}` });
+      return res.status(404).json({ error: `No learner persona found for userId: ${userId}` });
     }
     const personaData = personaSnap.docs[0].data() || {};
     if (!personaData.wpm || !personaData.dailyReadingTime) {
@@ -3400,17 +3375,11 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
         .json({ error: "Persona doc must have 'wpm' and 'dailyReadingTime'." });
     }
     const finalWpm = wpmOverride || personaData.wpm;
-    const finalDailyReadingTime =
-      dailyReadingTimeOverride || personaData.dailyReadingTime;
-    let maxDayCount =
-      maxDaysOverride !== null ? maxDaysOverride : defaultMaxDayCount;
+    const finalDailyReadingTime = dailyReadingTimeOverride || personaData.dailyReadingTime;
+    let maxDayCount = maxDaysOverride !== null ? maxDaysOverride : defaultMaxDayCount;
 
-    logDetails.push(
-      `Fetched persona => wpm=${personaData.wpm}, dailyReadingTime=${personaData.dailyReadingTime}`
-    );
-    logDetails.push(
-      `Final WPM used: ${finalWpm}, dailyReadingTime: ${finalDailyReadingTime}, maxDayCount: ${maxDayCount}`
-    );
+    logDetails.push(`Fetched persona => wpm=${personaData.wpm}, dailyReadingTime=${personaData.dailyReadingTime}`);
+    logDetails.push(`Final WPM: ${finalWpm}, dailyReadingTime: ${finalDailyReadingTime}, maxDayCount: ${maxDayCount}`);
 
     // ---------------------
     // D) Fetch exam config
@@ -3418,33 +3387,18 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     const examDocRef = db.collection("examConfigs").doc(examId);
     const examDocSnap = await examDocRef.get();
     if (!examDocSnap.exists) {
-      if (examId !== "general") {
-        return res
-          .status(400)
-          .json({ error: `No exam config found for examId='${examId}'.` });
-      } else {
-        return res
-          .status(400)
-          .json({ error: "No 'general' exam config found in examConfigs." });
-      }
+      return res.status(400).json({ error: `No exam config found for examId='${examId}'.` });
     }
     const examConfig = examDocSnap.data() || {};
     if (!examConfig.stages || !examConfig.planTypes) {
-      return res
-        .status(400)
-        .json({
-          error: `Exam config doc for '${examId}' missing 'stages' or 'planTypes'.`,
-        });
+      return res.status(400).json({ error: `Exam config doc missing 'stages' or 'planTypes'.` });
     }
-    logDetails.push(
-      `Exam config loaded => stages=${JSON.stringify(examConfig.stages)}`
-    );
+    logDetails.push(`Exam config => stages=${JSON.stringify(examConfig.stages)}`);
 
-    // We'll keep these helpers for startStage, finalStage
+    // For planType
     function getPlanTypeStages(planType) {
       const mapping = examConfig.planTypes[planType];
       if (!mapping) {
-        // fallback => first stage to last
         return {
           startStage: examConfig.stages[0],
           finalStage: examConfig.stages[examConfig.stages.length - 1],
@@ -3453,41 +3407,27 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
       return mapping;
     }
     const { startStage, finalStage } = getPlanTypeStages(level);
-    logDetails.push(
-      `Plan type => start="${startStage}", final="${finalStage}".`
-    );
+    logDetails.push(`Plan type => start="${startStage}", final="${finalStage}".`);
 
     // ---------------------
     // E) Call aggregator
     // ---------------------
     let aggregatorResult = {};
-    let aggregatorUrl =
-      "https://generateuserprogressaggregator2-zfztjkkvva-uc.a.run.app"; // your aggregator URL
     try {
       const axios = require("axios");
-      const aggRes = await axios.get(aggregatorUrl, {
+      const aggRes = await axios.get("YOUR-AGGREGATOR-URL", {
         params: {
           userId,
-          planId, // can be empty
-          bookId:
-            singleBookIdFromBody || (selectedBooks && selectedBooks[0]) || "",
+          planId,
+          bookId: singleBookIdFromBody || (selectedBooks && selectedBooks[0]) || "",
         },
       });
       if (aggRes.data && aggRes.data.aggregatorResult) {
         aggregatorResult = aggRes.data.aggregatorResult;
-        logDetails.push(
-          `Successfully fetched aggregator data => subCh count: ${Object.keys(
-            aggregatorResult
-          ).length}`
-        );
-      } else {
-        logDetails.push("Aggregator returned no aggregatorResult.");
+        logDetails.push(`Aggregator data => subCh count: ${Object.keys(aggregatorResult).length}`);
       }
     } catch (err) {
-      logDetails.push(
-        `Error calling aggregator => ${err.message || err.toString()}`
-      );
-      // Fallback => aggregatorResult remains empty
+      logDetails.push(`Aggregator error => ${err.message}`);
     }
 
     // ---------------------
@@ -3499,19 +3439,19 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     } else if (singleBookIdFromBody) {
       arrayOfBookIds = [singleBookIdFromBody];
     }
+
     let booksSnap;
     if (arrayOfBookIds.length > 0) {
       booksSnap = await db
         .collection("books_demo")
         .where(admin.firestore.FieldPath.documentId(), "in", arrayOfBookIds)
         .get();
-      logDetails.push(
-        `Fetching books by ID => ${JSON.stringify(arrayOfBookIds)}`
-      );
+      logDetails.push(`Fetching books by ID => ${JSON.stringify(arrayOfBookIds)}`);
     } else {
       booksSnap = await db.collection("books_demo").get();
       logDetails.push("Fetching all books (no IDs specified).");
     }
+
     const booksData = [];
     for (const bookDoc of booksSnap.docs) {
       const bookId = bookDoc.id;
@@ -3543,11 +3483,7 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
           subSnap = await db
             .collection("subchapters_demo")
             .where("chapterId", "==", chId)
-            .where(
-              admin.firestore.FieldPath.documentId(),
-              "in",
-              selectedSubChapters
-            )
+            .where(admin.firestore.FieldPath.documentId(), "in", selectedSubChapters)
             .get();
         } else {
           subSnap = await db
@@ -3555,84 +3491,68 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
             .where("chapterId", "==", chId)
             .get();
         }
-        const subData = subSnap.docs.map((sd) => ({
-          id: sd.id,
-          ...sd.data(),
-        }));
+        const subData = subSnap.docs.map((sd) => ({ id: sd.id, ...sd.data() }));
         chapter.subchapters = sortByNameWithNumericAware(subData);
         chaptersData.push(chapter);
       }
       book.chapters = sortByNameWithNumericAware(chaptersData);
       booksData.push(book);
     }
-    logDetails.push(
-      `Total books fetched: ${booksData.length}. Building plan tasks next.`
-    );
+    logDetails.push(`Total books: ${booksData.length}`);
 
     // ---------------------
-    // G) Build tasks from aggregator
+    // G) Build tasks (But group them by stage buckets)
     // ---------------------
-    const allActivities = [];
-
-    // Helper to return index of a stage within examConfig.stages
     const stIndex = (str) => examConfig.stages.indexOf(str);
     const startIdx = stIndex(startStage);
     const finalIdx = stIndex(finalStage);
 
-    function maybeCreateReadingTask(subCh, aggEntry) {
-      if (!aggEntry) {
-        // aggregator gave no data => treat as not started
+    // We'll define a small helper
+    function maybeReadingTask(subCh, agg) {
+      if (!agg || agg.reading !== "done") {
+        // aggregator says "not done" => we need a reading task
+        const readTime = subCh.wordCount
+          ? Math.ceil(subCh.wordCount / finalWpm)
+          : 5;
         return {
           type: "READ",
-          aggregatorTask: "READ",
-          aggregatorStatus: "not-started",
-          timeNeeded: subCh.wordCount
-            ? Math.ceil(subCh.wordCount / finalWpm)
-            : 5,
+          aggregatorStatus: agg ? agg.reading || "not-started" : "not-started",
+          timeNeeded: readTime,
         };
       }
-      // aggregator says reading => "done"|"in-progress"|"locked"|"not-started"
-      if (aggEntry.reading === "done") {
-        return null;
-      }
-      // else => create a READ task
-      const readTime = subCh.wordCount
-        ? Math.ceil(subCh.wordCount / finalWpm)
-        : 5;
-      return {
-        type: "READ",
-        aggregatorTask: aggEntry.readingNextTask || "READ",
-        aggregatorStatus: aggEntry.reading,
-        timeNeeded: readTime,
-      };
+      return null;
     }
-
-    function maybeCreateQuizTask(subCh, aggEntry, stageKey) {
-      // skip if aggregator says stage is done or doesn't exist
-      if (!aggEntry) {
-        // aggregator gave no data => treat as not started
+    function maybeRememberTask(subCh, agg) {
+      // aggregator says "remember" => not done => create QUIZ
+      if (!examConfig.stages.includes("remember")) return null;
+      if (!agg || agg.remember !== "done") {
         return {
           type: "QUIZ",
-          quizStage: stageKey,
-          aggregatorTask: "QUIZ1",
-          aggregatorStatus: "not-started",
+          quizStage: "remember",
+          aggregatorStatus: agg ? agg.remember || "not-started" : "not-started",
           timeNeeded: quizTimeOverride,
         };
       }
-      const stageStatus = aggEntry[stageKey]; // e.g. "done"|"in-progress"|"locked"|"not-started"
-      if (!stageStatus || stageStatus === "done") {
-        return null;
-      }
-      const aggregatorTaskField = stageKey + "NextTask"; // e.g. "rememberNextTask"
-      const aggregatorTaskVal = aggEntry[aggregatorTaskField] || "QUIZ?";
-      return {
-        type: "QUIZ",
-        quizStage: stageKey,
-        aggregatorTask: aggregatorTaskVal,
-        aggregatorStatus: stageStatus,
-        timeNeeded: quizTimeOverride,
-      };
+      return null;
     }
+    function maybeQuizTask(subCh, agg, stageKey) {
+      if (!agg || agg[stageKey] !== "done") {
+        return {
+          type: "QUIZ",
+          quizStage: stageKey,
+          aggregatorStatus: agg ? agg[stageKey] || "not-started" : "not-started",
+          timeNeeded: quizTimeOverride,
+        };
+      }
+      return null;
+    }
+
+    // NEW: We'll keep different arrays for each stage "bucket"
+    const bucketReadingRemember = []; // read + remember combined
+    const bucketUnderstand = [];
+    const bucketApply = [];
+    const bucketAnalyze = [];
+    // If your exam has more stages, add them here or store them in a dictionary.
 
     for (const book of booksData) {
       if (!book.chapters) continue;
@@ -3642,145 +3562,141 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
           const subChId = subCh.id;
           const aggEntry = aggregatorResult[subChId] || null;
 
-          // 1) Possibly create reading task
-          const readTask = maybeCreateReadingTask(subCh, aggEntry);
-          if (readTask) {
-            allActivities.push({
-              ...readTask,
+          // reading
+          const rd = maybeReadingTask(subCh, aggEntry);
+          if (rd) {
+            bucketReadingRemember.push({
+              ...rd,
               bookId: book.id,
               bookName: book.name || "",
               chapterId: chapter.id,
               chapterName: chapter.name || "",
               subChapterId: subChId,
               subChapterName: subCh.name || "",
-              level,
             });
-
-            // Immediately schedule the remember task if it's within [startStage..finalStage] and needed
-            const rememberIdx = stIndex("remember");
-            if (
-              rememberIdx >= startIdx &&
-              rememberIdx <= finalIdx &&
-              examConfig.stages.includes("remember")
-            ) {
-              const rememberTask = maybeCreateQuizTask(subCh, aggEntry, "remember");
-              if (rememberTask) {
-                allActivities.push({
-                  ...rememberTask,
-                  bookId: book.id,
-                  bookName: book.name || "",
-                  chapterId: chapter.id,
-                  chapterName: chapter.name || "",
-                  subChapterId: subChId,
-                  subChapterName: subCh.name || "",
-                  level,
-                });
-              }
-            }
           }
 
-          // 2) For each quiz stage other than 'reading'/'remember'/'none'/''
-          for (const stageKey of examConfig.stages) {
-            if (
-              stageKey === "reading" ||
-              stageKey === "remember" ||
-              stageKey === "none" ||
-              stageKey === ""
-            ) {
-              continue;
-            }
-            const stageIdx = stIndex(stageKey);
-            if (stageIdx < startIdx || stageIdx > finalIdx) {
-              continue; // skip if outside plan's range
-            }
+          // remember
+          const rem = maybeRememberTask(subCh, aggEntry);
+          if (rem) {
+            bucketReadingRemember.push({
+              ...rem,
+              bookId: book.id,
+              bookName: book.name || "",
+              chapterId: chapter.id,
+              chapterName: chapter.name || "",
+              subChapterId: subChId,
+              subChapterName: subCh.name || "",
+            });
+          }
 
-            // aggregator says this stage might be incomplete => create quiz
-            const quizTask = maybeCreateQuizTask(subCh, aggEntry, stageKey);
-            if (quizTask) {
-              allActivities.push({
-                ...quizTask,
-                bookId: book.id,
-                bookName: book.name || "",
-                chapterId: chapter.id,
-                chapterName: chapter.name || "",
-                subChapterId: subChId,
-                subChapterName: subCh.name || "",
-                level,
-              });
+          // now for the other quiz stages
+          for (const stageKey of examConfig.stages) {
+            // skip reading/remember
+            if (stageKey === "reading" || stageKey === "remember") continue;
+            const idx = stIndex(stageKey);
+            if (idx < startIdx || idx > finalIdx) continue;
+
+            const qz = maybeQuizTask(subCh, aggEntry, stageKey);
+            if (!qz) continue;
+
+            const item = {
+              ...qz,
+              bookId: book.id,
+              bookName: book.name || "",
+              chapterId: chapter.id,
+              chapterName: chapter.name || "",
+              subChapterId: subChId,
+              subChapterName: subCh.name || "",
+            };
+            // Bucket them
+            if (stageKey === "understand") {
+              bucketUnderstand.push(item);
+            } else if (stageKey === "apply") {
+              bucketApply.push(item);
+            } else if (stageKey === "analyze") {
+              bucketAnalyze.push(item);
             }
+            // If you have more stages (e.g. "evaluate", "create"), add them similarly.
           }
         }
       }
     }
 
     logDetails.push(
-      `Total tasks built from aggregator: ${allActivities.length}`
+      `Bucket sizes => reading+remember=${bucketReadingRemember.length}, ` +
+        `understand=${bucketUnderstand.length}, apply=${bucketApply.length}, analyze=${bucketAnalyze.length}`
     );
 
     // ---------------------
-    // H) Distribute tasks into sessions (revised to preserve order)
+    // H) Distribute tasks: All reading+remember first, then next day => understand, next day => apply...
     // ---------------------
-    const dailyTimeMins = finalDailyReadingTime;
-    let dayIndex = 1;
     const sessions = [];
-    let pendingTasks = [...allActivities];
+    let dayIndex = 1;
 
-    logDetails.push(
-      `Now distributing tasks => dailyTime=${dailyTimeMins}, maxDayCount=${maxDayCount}`
-    );
+    // Helper to fill tasks into days until we run out or reach maxDayCount
+    function distributeBucket(bucketTasks, stageName) {
+      let localTasks = [...bucketTasks];
+      while (localTasks.length > 0 && dayIndex <= maxDayCount) {
+        // create a new day
+        let timeUsed = 0;
+        let dayActivities = [];
+        while (localTasks.length > 0) {
+          const leftover = finalDailyReadingTime - timeUsed;
+          if (leftover <= 0) break;
 
-    function buildNextDay() {
-      return {
-        sessionLabel: dayIndex.toString(),
-        activities: [],
-        timeUsed: 0,
-      };
-    }
-    let currentDay = buildNextDay();
-
-    function finalizeDay() {
-      if (currentDay.activities.length > 0) {
+          const nextTask = localTasks[0];
+          const tNeeded = nextTask.timeNeeded || 1;
+          if (tNeeded <= leftover) {
+            // schedule it
+            dayActivities.push(nextTask);
+            timeUsed += tNeeded;
+            localTasks.shift();
+          } else {
+            break;
+          }
+        }
+        if (dayActivities.length === 0) {
+          // can't fit anything => skip this day
+          dayIndex++;
+          continue;
+        }
         sessions.push({
-          sessionLabel: currentDay.sessionLabel,
-          activities: currentDay.activities,
+          sessionLabel: dayIndex.toString(),
+          stageBucket: stageName, // just to help debug
+          activities: dayActivities,
         });
-        logDetails.push(
-          `Day ${currentDay.sessionLabel}: ${currentDay.activities.length} activities, ${currentDay.timeUsed} mins`
-        );
         dayIndex++;
       }
-      currentDay = buildNextDay();
+      return localTasks.length; // how many remain unscheduled
     }
 
-    // Simple FIFO approach: take tasks in the order they appear in pendingTasks.
-    while (pendingTasks.length > 0 && dayIndex <= maxDayCount) {
-      const leftover = dailyTimeMins - currentDay.timeUsed;
-      if (leftover <= 0) {
-        // No more time left in this day
-        finalizeDay();
-        continue;
-      }
+    // 1) reading+remember
+    let remaining = distributeBucket(bucketReadingRemember, "reading+remember");
+    logDetails.push(`reading+remember => leftover unscheduled: ${remaining}`);
 
-      const nextTask = pendingTasks[0];
-      const actTime = nextTask.timeNeeded || 1;
-      if (actTime <= leftover) {
-        // It fits => schedule it now
-        currentDay.activities.push(nextTask);
-        currentDay.timeUsed += actTime;
-        pendingTasks.shift(); // Remove from front
-      } else {
-        // Not enough leftover => finalize day
-        finalizeDay();
-      }
-    }
+    // 2) (Optional) add a 1-day gap
+    dayIndex++;
 
-    // If we still have tasks left but ran out of days, we just won't schedule them
-    // If we have leftover day, finalize it anyway:
-    if (currentDay.activities.length > 0 && dayIndex <= maxDayCount) {
-      finalizeDay();
-    }
+    // 3) understand
+    remaining = distributeBucket(bucketUnderstand, "understand");
+    logDetails.push(`understand => leftover: ${remaining}`);
 
-    logDetails.push(`Task distribution done. Total days: ${sessions.length}.`);
+    // next day gap
+    dayIndex++;
+
+    // 4) apply
+    remaining = distributeBucket(bucketApply, "apply");
+    logDetails.push(`apply => leftover: ${remaining}`);
+
+    // next day gap
+    dayIndex++;
+
+    // 5) analyze
+    remaining = distributeBucket(bucketAnalyze, "analyze");
+    logDetails.push(`analyze => leftover: ${remaining}`);
+
+    // If you had more stages, keep going similarly…
 
     // ---------------------
     // I) Write final plan doc
@@ -3798,7 +3714,7 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
       userId,
       targetDate: targetDateStr,
       sessions,
-      maxDayCount,
+      maxDayCount: maxDayCount,
       wpmUsed: finalWpm,
       dailyReadingTimeUsed: finalDailyReadingTime,
       level,
@@ -3806,10 +3722,11 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
       examId,
       logDetails,
     };
+
     const newRef = await db.collection("adaptive_demo").add(planDoc);
 
     return res.status(200).json({
-      message: "Successfully generated plan (v2) in 'adaptive_demo'.",
+      message: "Successfully generated plan (v2) with chunked scheduling.",
       planId: newRef.id,
       planDoc,
     });

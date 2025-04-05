@@ -4905,6 +4905,203 @@ app.get("/api/getActivityTime", async (req, res) => {
   }
 });
 
+/**
+ * GET /subchapter-history?userId=...&planId=...&subchapterId=...
+ * => Return all quiz attempts, revision attempts, concept mastery, etc. 
+ *    across all quiz stages: remember, understand, apply, analyze.
+ */
+app.get("/subchapter-history", async (req, res) => {
+  try {
+    const { userId, planId, subchapterId } = req.query;
+    if (!userId || !planId || !subchapterId) {
+      return res.status(400).json({ error: "Missing userId, planId, or subchapterId" });
+    }
+
+    // 1) We'll build a final "history" object keyed by quiz stage.
+    //    e.g. { remember: {...}, understand: {...}, apply: {...}, analyze: {...} }
+    const QUIZ_STAGES = ["remember", "understand", "apply", "analyze"];
+    const finalData = {};
+
+    // 2) For each stage => gather aggregator-like data
+    for (const stage of QUIZ_STAGES) {
+      const stageData = await gatherStageHistory(userId, planId, subchapterId, stage);
+      finalData[stage] = stageData;
+    }
+
+    // 3) Return the final object
+    return res.json({
+      userId,
+      planId,
+      subchapterId,
+      history: finalData,
+    });
+  } catch (err) {
+    console.error("[/subchapter-history] error =>", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * gatherStageHistory
+ * => returns an object like:
+ *    {
+ *      quizAttempts: [
+ *        { attemptNumber, score, timestamp, conceptStats: [...] },
+ *        ...
+ *      ],
+ *      revisionAttempts: [
+ *        { revisionNumber, timestamp },
+ *        ...
+ *      ],
+ *      masteryPct: number,   // 0..100
+ *      conceptMastery: [
+ *        { conceptName, ratio, passOrFail, correct, total },
+ *        ...
+ *      ]
+ *    }
+ */
+/**
+ * Gathers quiz + revision attempts for a given stage, builds an aggregated
+ * conceptMastery array so that if a concept was passed in ANY attempt,
+ * we still show "PASS" for that concept. This matches your masteryPct.
+ */
+async function gatherStageHistory(userId, planId, subChId, stage) {
+  const dbRef = admin.firestore();
+
+  // 1) Get all quiz attempts for this user/plan/subchapter/stage
+  const quizSnap = await dbRef
+    .collection("quizzes_demo")
+    .where("userId", "==", userId)
+    .where("planId", "==", planId)
+    .where("subchapterId", "==", subChId)
+    .where("quizType", "==", stage)
+    .get();
+
+  const quizAttempts = [];
+  quizSnap.forEach((docSnap) => {
+    const d = docSnap.data();
+    quizAttempts.push({
+      attemptNumber: d.attemptNumber || 1,
+      score: d.score || "",            // e.g. "75%" or "50.00%"
+      timestamp: d.timestamp || null,  // Firestore timestamp
+      quizSubmission: d.quizSubmission || [],
+    });
+  });
+
+  // Sort quiz attempts by timestamp, then attemptNumber
+  quizAttempts.sort((a, b) => {
+    const tA = toMillis(a.timestamp), tB = toMillis(b.timestamp);
+    if (tA !== tB) return tA - tB;
+    return (a.attemptNumber || 0) - (b.attemptNumber || 0);
+  });
+
+  // 2) Get all revision attempts for the same stage
+  const revSnap = await dbRef
+    .collection("revisions_demo")
+    .where("userId", "==", userId)
+    .where("planId", "==", planId)
+    .where("subchapterId", "==", subChId)
+    .where("revisionType", "==", stage)
+    .get();
+
+  const revisionAttempts = [];
+  revSnap.forEach((docSnap) => {
+    const d = docSnap.data();
+    revisionAttempts.push({
+      revisionNumber: d.revisionNumber || 1,
+      timestamp: d.timestamp || null,
+    });
+  });
+
+  // Sort revision attempts similarly
+  revisionAttempts.sort((a, b) => {
+    const tA = toMillis(a.timestamp), tB = toMillis(b.timestamp);
+    if (tA !== tB) return tA - tB;
+    return (a.revisionNumber || 0) - (b.revisionNumber || 0);
+  });
+
+  // 3) Fetch all subchapterConcepts so we know which concepts exist
+  const conceptSnap = await dbRef
+    .collection("subchapterConcepts")
+    .where("subChapterId", "==", subChId)
+    .get();
+
+  const conceptArr = [];
+  conceptSnap.forEach((cDoc) => {
+    const cData = cDoc.data();
+    const name = cData.name || "UnnamedConcept";
+    conceptArr.push({ name });
+  });
+
+  // 4) For each quiz attempt => build the standard "attempt.conceptStats"
+  //    using your existing per‐attempt logic (buildConceptStats)
+  quizAttempts.forEach((attempt) => {
+    attempt.conceptStats = buildConceptStats(attempt.quizSubmission, conceptArr);
+    // e.g. each conceptStats item => { conceptName, correct, total, ratio, passOrFail }
+  });
+
+  // 5) Build a "cumulative" conceptMastery array => if concept is ever passed,
+  //    we show PASS here, plus the attempt # where it was first passed
+  const cumulativeStats = buildCumulativeConceptMastery(quizAttempts, conceptArr);
+
+  // 6) masteryPct => how many total concepts are "PASS" out of conceptArr.length
+  const passCount = cumulativeStats.filter((c) => c.passOrFail === "PASS").length;
+  const totalCount = conceptArr.length;
+  const masteryPct = totalCount > 0 ? (passCount / totalCount) * 100 : 0;
+
+  // Return final object
+  return {
+    quizAttempts,       // each attempt has conceptStats
+    revisionAttempts,   // normal as before
+    masteryPct,         // aggregated pass rate
+    conceptMastery: cumulativeStats,  // aggregated pass/fail for all concepts
+  };
+}
+
+/**
+ * Example buildCumulativeConceptMastery function:
+ *  - Goes through all quiz attempts, merges pass/fail for each concept
+ *  - If ratio==1 in ANY attempt, mark it PASS in the final array
+ */
+function buildCumulativeConceptMastery(quizAttempts, conceptArr) {
+  const conceptMap = {};
+  // Initialize from known subchapterConcepts
+  conceptArr.forEach((c) => {
+    conceptMap[c.name] = {
+      name: c.name,
+      pass: false,
+      passAttempt: null,  // attemptNumber of first pass
+    };
+  });
+
+  // Walk through each attempt's conceptStats
+  quizAttempts.forEach((attempt) => {
+    const aNum = attempt.attemptNumber || 1;
+    (attempt.conceptStats || []).forEach((cs) => {
+      if (!conceptMap[cs.conceptName]) {
+        conceptMap[cs.conceptName] = {
+          name: cs.conceptName,
+          pass: false,
+          passAttempt: null,
+        };
+      }
+      // If ratio==1 => concept is passed on this attempt
+      if (cs.ratio === 1 && !conceptMap[cs.conceptName].pass) {
+        conceptMap[cs.conceptName].pass = true;
+        conceptMap[cs.conceptName].passAttempt = aNum;
+      }
+    });
+  });
+
+  // Build final array => e.g. { conceptName, ratio, passOrFail, passAttempt }
+  return Object.values(conceptMap).map((obj) => ({
+    conceptName: obj.name,
+    ratio: obj.pass ? 1 : 0,
+    passOrFail: obj.pass ? "PASS" : "FAIL",
+    passAttempt: obj.passAttempt, // might be null if never passed
+  }));
+}
+
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
