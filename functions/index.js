@@ -14,7 +14,7 @@ const { Tiktoken } = require("@dqbd/tiktoken");
 const cl100k = require("@dqbd/tiktoken/encoders/cl100k_base.json");
 admin.initializeApp();
 const storage = new Storage();
-
+const { v4: uuidv4 } = require("uuid");
 
 
 
@@ -3301,6 +3301,16 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
 
 */
 
+/**
+ * File: index.js (or your firebase function file)
+ */
+
+// 1) Import uuid
+
+// ... your other imports like:
+// const admin = require("firebase-admin");
+// const { onRequest } = require("firebase-functions/v2/https");
+
 exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
   res.set("Access-Control-Allow-Origin", "*");
   res.set("Access-Control-Allow-Headers", "Content-Type,Authorization");
@@ -3336,15 +3346,22 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     let defaultMaxDayCount = getDaysBetween(today, targetDate);
     if (defaultMaxDayCount < 0) defaultMaxDayCount = 0;
 
-    const maxDaysOverride = req.body.maxDays !== undefined ? Number(req.body.maxDays) : null;
-    const wpmOverride = req.body.wpm !== undefined ? Number(req.body.wpm) : null;
+    const maxDaysOverride =
+      req.body.maxDays !== undefined ? Number(req.body.maxDays) : null;
+    const wpmOverride =
+      req.body.wpm !== undefined ? Number(req.body.wpm) : null;
     const dailyReadingTimeOverride =
       req.body.dailyReadingTime !== undefined ? Number(req.body.dailyReadingTime) : null;
-    const quizTimeOverride = req.body.quizTime !== undefined ? Number(req.body.quizTime) : 5;
+    const quizTimeOverride =
+      req.body.quizTime !== undefined ? Number(req.body.quizTime) : 5;
     const level = req.body.planType || "none-basic";
 
-    const selectedBooks = Array.isArray(req.body.selectedBooks) ? req.body.selectedBooks : null;
-    const selectedChapters = Array.isArray(req.body.selectedChapters) ? req.body.selectedChapters : null;
+    const selectedBooks = Array.isArray(req.body.selectedBooks)
+      ? req.body.selectedBooks
+      : null;
+    const selectedChapters = Array.isArray(req.body.selectedChapters)
+      ? req.body.selectedChapters
+      : null;
     const selectedSubChapters = Array.isArray(req.body.selectedSubChapters)
       ? req.body.selectedSubChapters
       : null;
@@ -3366,7 +3383,9 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
       .limit(1)
       .get();
     if (personaSnap.empty) {
-      return res.status(404).json({ error: `No learner persona found for userId: ${userId}` });
+      return res
+        .status(404)
+        .json({ error: `No learner persona found for userId: ${userId}` });
     }
     const personaData = personaSnap.docs[0].data() || {};
     if (!personaData.wpm || !personaData.dailyReadingTime) {
@@ -3375,11 +3394,17 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
         .json({ error: "Persona doc must have 'wpm' and 'dailyReadingTime'." });
     }
     const finalWpm = wpmOverride || personaData.wpm;
-    const finalDailyReadingTime = dailyReadingTimeOverride || personaData.dailyReadingTime;
-    let maxDayCount = maxDaysOverride !== null ? maxDaysOverride : defaultMaxDayCount;
+    const finalDailyReadingTime =
+      dailyReadingTimeOverride || personaData.dailyReadingTime;
+    let maxDayCount =
+      maxDaysOverride !== null ? maxDaysOverride : defaultMaxDayCount;
 
-    logDetails.push(`Fetched persona => wpm=${personaData.wpm}, dailyReadingTime=${personaData.dailyReadingTime}`);
-    logDetails.push(`Final WPM: ${finalWpm}, dailyReadingTime: ${finalDailyReadingTime}, maxDayCount: ${maxDayCount}`);
+    logDetails.push(
+      `Fetched persona => wpm=${personaData.wpm}, dailyReadingTime=${personaData.dailyReadingTime}`
+    );
+    logDetails.push(
+      `Final WPM: ${finalWpm}, dailyReadingTime: ${finalDailyReadingTime}, maxDayCount: ${maxDayCount}`
+    );
 
     // ---------------------
     // D) Fetch exam config
@@ -3387,13 +3412,19 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     const examDocRef = db.collection("examConfigs").doc(examId);
     const examDocSnap = await examDocRef.get();
     if (!examDocSnap.exists) {
-      return res.status(400).json({ error: `No exam config found for examId='${examId}'.` });
+      return res
+        .status(400)
+        .json({ error: `No exam config found for examId='${examId}'.` });
     }
     const examConfig = examDocSnap.data() || {};
     if (!examConfig.stages || !examConfig.planTypes) {
-      return res.status(400).json({ error: `Exam config doc missing 'stages' or 'planTypes'.` });
+      return res
+        .status(400)
+        .json({ error: `Exam config doc missing 'stages' or 'planTypes'.` });
     }
-    logDetails.push(`Exam config => stages=${JSON.stringify(examConfig.stages)}`);
+    logDetails.push(
+      `Exam config => stages=${JSON.stringify(examConfig.stages)}`
+    );
 
     // For planType
     function getPlanTypeStages(planType) {
@@ -3407,7 +3438,9 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
       return mapping;
     }
     const { startStage, finalStage } = getPlanTypeStages(level);
-    logDetails.push(`Plan type => start="${startStage}", final="${finalStage}".`);
+    logDetails.push(
+      `Plan type => start="${startStage}", final="${finalStage}".`
+    );
 
     // ---------------------
     // E) Call aggregator
@@ -3419,12 +3452,17 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
         params: {
           userId,
           planId,
-          bookId: singleBookIdFromBody || (selectedBooks && selectedBooks[0]) || "",
+          bookId:
+            singleBookIdFromBody ||
+            (selectedBooks && selectedBooks[0]) ||
+            "",
         },
       });
       if (aggRes.data && aggRes.data.aggregatorResult) {
         aggregatorResult = aggRes.data.aggregatorResult;
-        logDetails.push(`Aggregator data => subCh count: ${Object.keys(aggregatorResult).length}`);
+        logDetails.push(
+          `Aggregator data => subCh count: ${Object.keys(aggregatorResult).length}`
+        );
       }
     } catch (err) {
       logDetails.push(`Aggregator error => ${err.message}`);
@@ -3446,7 +3484,9 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
         .collection("books_demo")
         .where(admin.firestore.FieldPath.documentId(), "in", arrayOfBookIds)
         .get();
-      logDetails.push(`Fetching books by ID => ${JSON.stringify(arrayOfBookIds)}`);
+      logDetails.push(
+        `Fetching books by ID => ${JSON.stringify(arrayOfBookIds)}`
+      );
     } else {
       booksSnap = await db.collection("books_demo").get();
       logDetails.push("Fetching all books (no IDs specified).");
@@ -3483,7 +3523,11 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
           subSnap = await db
             .collection("subchapters_demo")
             .where("chapterId", "==", chId)
-            .where(admin.firestore.FieldPath.documentId(), "in", selectedSubChapters)
+            .where(
+              admin.firestore.FieldPath.documentId(),
+              "in",
+              selectedSubChapters
+            )
             .get();
         } else {
           subSnap = await db
@@ -3491,7 +3535,10 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
             .where("chapterId", "==", chId)
             .get();
         }
-        const subData = subSnap.docs.map((sd) => ({ id: sd.id, ...sd.data() }));
+        const subData = subSnap.docs.map((sd) => ({
+          id: sd.id,
+          ...sd.data(),
+        }));
         chapter.subchapters = sortByNameWithNumericAware(subData);
         chaptersData.push(chapter);
       }
@@ -3501,16 +3548,15 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     logDetails.push(`Total books: ${booksData.length}`);
 
     // ---------------------
-    // G) Build tasks (But group them by stage buckets)
+    // G) Build tasks (grouped by stage buckets)
     // ---------------------
     const stIndex = (str) => examConfig.stages.indexOf(str);
     const startIdx = stIndex(startStage);
     const finalIdx = stIndex(finalStage);
 
-    // We'll define a small helper
     function maybeReadingTask(subCh, agg) {
       if (!agg || agg.reading !== "done") {
-        // aggregator says "not done" => we need a reading task
+        // aggregator says "not done"
         const readTime = subCh.wordCount
           ? Math.ceil(subCh.wordCount / finalWpm)
           : 5;
@@ -3523,7 +3569,6 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
       return null;
     }
     function maybeRememberTask(subCh, agg) {
-      // aggregator says "remember" => not done => create QUIZ
       if (!examConfig.stages.includes("remember")) return null;
       if (!agg || agg.remember !== "done") {
         return {
@@ -3540,19 +3585,20 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
         return {
           type: "QUIZ",
           quizStage: stageKey,
-          aggregatorStatus: agg ? agg[stageKey] || "not-started" : "not-started",
+          aggregatorStatus: agg
+            ? agg[stageKey] || "not-started"
+            : "not-started",
           timeNeeded: quizTimeOverride,
         };
       }
       return null;
     }
 
-    // NEW: We'll keep different arrays for each stage "bucket"
+    // We'll keep different arrays for each stage "bucket"
     const bucketReadingRemember = []; // read + remember combined
     const bucketUnderstand = [];
     const bucketApply = [];
     const bucketAnalyze = [];
-    // If your exam has more stages, add them here or store them in a dictionary.
 
     for (const book of booksData) {
       if (!book.chapters) continue;
@@ -3566,6 +3612,8 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
           const rd = maybeReadingTask(subCh, aggEntry);
           if (rd) {
             bucketReadingRemember.push({
+              // assign a new activityId here
+              activityId: uuidv4(), //<-- NEW
               ...rd,
               bookId: book.id,
               bookName: book.name || "",
@@ -3580,6 +3628,7 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
           const rem = maybeRememberTask(subCh, aggEntry);
           if (rem) {
             bucketReadingRemember.push({
+              activityId: uuidv4(), //<-- NEW
               ...rem,
               bookId: book.id,
               bookName: book.name || "",
@@ -3590,9 +3639,8 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
             });
           }
 
-          // now for the other quiz stages
+          // other quiz stages
           for (const stageKey of examConfig.stages) {
-            // skip reading/remember
             if (stageKey === "reading" || stageKey === "remember") continue;
             const idx = stIndex(stageKey);
             if (idx < startIdx || idx > finalIdx) continue;
@@ -3601,6 +3649,7 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
             if (!qz) continue;
 
             const item = {
+              activityId: uuidv4(), //<-- NEW
               ...qz,
               bookId: book.id,
               bookName: book.name || "",
@@ -3617,28 +3666,25 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
             } else if (stageKey === "analyze") {
               bucketAnalyze.push(item);
             }
-            // If you have more stages (e.g. "evaluate", "create"), add them similarly.
           }
         }
       }
     }
 
     logDetails.push(
-      `Bucket sizes => reading+remember=${bucketReadingRemember.length}, ` +
-        `understand=${bucketUnderstand.length}, apply=${bucketApply.length}, analyze=${bucketAnalyze.length}`
+      `Bucket sizes => reading+remember=${bucketReadingRemember.length},` +
+        ` understand=${bucketUnderstand.length}, apply=${bucketApply.length}, analyze=${bucketAnalyze.length}`
     );
 
     // ---------------------
-    // H) Distribute tasks: All reading+remember first, then next day => understand, next day => apply...
+    // H) Distribute tasks: All reading+remember first, etc.
     // ---------------------
     const sessions = [];
     let dayIndex = 1;
 
-    // Helper to fill tasks into days until we run out or reach maxDayCount
     function distributeBucket(bucketTasks, stageName) {
       let localTasks = [...bucketTasks];
       while (localTasks.length > 0 && dayIndex <= maxDayCount) {
-        // create a new day
         let timeUsed = 0;
         let dayActivities = [];
         while (localTasks.length > 0) {
@@ -3648,7 +3694,6 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
           const nextTask = localTasks[0];
           const tNeeded = nextTask.timeNeeded || 1;
           if (tNeeded <= leftover) {
-            // schedule it
             dayActivities.push(nextTask);
             timeUsed += tNeeded;
             localTasks.shift();
@@ -3657,46 +3702,45 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
           }
         }
         if (dayActivities.length === 0) {
-          // can't fit anything => skip this day
           dayIndex++;
           continue;
         }
         sessions.push({
           sessionLabel: dayIndex.toString(),
-          stageBucket: stageName, // just to help debug
+          stageBucket: stageName,
           activities: dayActivities,
         });
         dayIndex++;
       }
-      return localTasks.length; // how many remain unscheduled
+      return localTasks.length; // leftover
     }
 
     // 1) reading+remember
     let remaining = distributeBucket(bucketReadingRemember, "reading+remember");
-    logDetails.push(`reading+remember => leftover unscheduled: ${remaining}`);
+    logDetails.push(`reading+remember => leftover: ${remaining}`);
 
-    // 2) (Optional) add a 1-day gap
+    // next day gap
     dayIndex++;
 
-    // 3) understand
+    // 2) understand
     remaining = distributeBucket(bucketUnderstand, "understand");
     logDetails.push(`understand => leftover: ${remaining}`);
 
     // next day gap
     dayIndex++;
 
-    // 4) apply
+    // 3) apply
     remaining = distributeBucket(bucketApply, "apply");
     logDetails.push(`apply => leftover: ${remaining}`);
 
     // next day gap
     dayIndex++;
 
-    // 5) analyze
+    // 4) analyze
     remaining = distributeBucket(bucketAnalyze, "analyze");
     logDetails.push(`analyze => leftover: ${remaining}`);
 
-    // If you had more stages, keep going similarly…
+    // ... more stages if needed
 
     // ---------------------
     // I) Write final plan doc
@@ -3714,7 +3758,7 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
       userId,
       targetDate: targetDateStr,
       sessions,
-      maxDayCount: maxDayCount,
+      maxDayCount,
       wpmUsed: finalWpm,
       dailyReadingTimeUsed: finalDailyReadingTime,
       level,

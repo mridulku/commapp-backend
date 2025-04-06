@@ -4843,62 +4843,89 @@ app.get("/api/getActivityTime", async (req, res) => {
     }
 
     let totalTime = 0;
+    let details = []; // <-- NEW: array of doc-specific info
 
     if (type === "read") {
-      // 1) Only read from readingSubActivity
+      // 1) readingSubActivity
       const snap = await db
         .collection("readingSubActivity")
         .where("activityId", "==", activityId)
         .get();
-      
+
       let sum = 0;
-      snap.forEach((doc) => {
-        const data = doc.data();
-        // e.g. data.totalSeconds 
-        if (data.totalSeconds) {
-          sum += data.totalSeconds;
-        }
+      snap.forEach((docSnap) => {
+        const docData = docSnap.data();
+        const sec = docData.totalSeconds || 0;
+        sum += sec;
+
+        // build an item in details array
+        details.push({
+          docId: docSnap.id,
+          collection: "readingSubActivity",
+          totalSeconds: sec,
+          lumps: docData.lumps || [],   // if lumps array exists
+          // you can include any other fields you want
+          createdAt: docData.createdAt || null,
+        });
       });
       totalTime = sum;
 
     } else if (type === "quiz") {
-      // 2) For quiz => sum from quizTimeSubActivity + reviseTimeSubActivity
+      // 2) quiz => sum from quizTimeSubActivity + reviseTimeSubActivity
+      let quizTimeSum = 0;
+      let reviseTimeSum = 0;
 
       // A) quizTimeSubActivity
-      let quizTimeSum = 0;
       const quizSnap = await db
         .collection("quizTimeSubActivity")
         .where("activityId", "==", activityId)
         .get();
-      quizSnap.forEach((doc) => {
-        const data = doc.data();
-        if (data.totalSeconds) {
-          quizTimeSum += data.totalSeconds;
-        }
+
+      quizSnap.forEach((docSnap) => {
+        const docData = docSnap.data();
+        const sec = docData.totalSeconds || 0;
+        quizTimeSum += sec;
+
+        details.push({
+          docId: docSnap.id,
+          collection: "quizTimeSubActivity",
+          totalSeconds: sec,
+          lumps: docData.lumps || [],
+          createdAt: docData.createdAt || null,
+        });
       });
 
       // B) reviseTimeSubActivity
-      let reviseTimeSum = 0;
       const reviseSnap = await db
         .collection("reviseTimeSubActivity")
         .where("activityId", "==", activityId)
         .get();
-      reviseSnap.forEach((doc) => {
-        const data = doc.data();
-        if (data.totalSeconds) {
-          reviseTimeSum += data.totalSeconds;
-        }
+
+      reviseSnap.forEach((docSnap) => {
+        const docData = docSnap.data();
+        const sec = docData.totalSeconds || 0;
+        reviseTimeSum += sec;
+
+        details.push({
+          docId: docSnap.id,
+          collection: "reviseTimeSubActivity",
+          totalSeconds: sec,
+          lumps: docData.lumps || [],
+          createdAt: docData.createdAt || null,
+        });
       });
 
       totalTime = quizTimeSum + reviseTimeSum;
 
     } else {
-      // If you have other types, handle them or return 400
       return res.status(400).json({ error: "Unsupported type." });
     }
 
-    // Finally return the sum
-    return res.json({ totalTime });
+    // Return totalTime + doc-level details
+    return res.json({
+      totalTime,
+      details,
+    });
   } catch (err) {
     console.error("[GET] /api/getActivityTime => error:", err);
     return res.status(500).json({ error: err.message });
