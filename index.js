@@ -5130,6 +5130,55 @@ function buildCumulativeConceptMastery(quizAttempts, conceptArr) {
 }
 
 
+app.get("/userDoc", async (req, res) => {
+  try {
+    console.log("===== Entered /userDoc route =====");
+
+    const { userId } = req.query;
+    console.log("Received userId from query:", userId);
+
+    if (!userId) {
+      console.error("No userId provided in query.");
+      return res.status(400).json({
+        success: false,
+        error: "Missing userId query parameter.",
+      });
+    }
+
+    // Fetch user doc from Firestore
+    console.log(`Attempting to fetch doc from 'users/${userId}'...`);
+    const userDocRef = admin.firestore().collection("users").doc(userId);
+    const userDocSnap = await userDocRef.get();
+
+    console.log("Doc exists:", userDocSnap.exists);
+
+    if (!userDocSnap.exists) {
+      console.error(`No user document found for userId: ${userId}`);
+      return res.status(404).json({
+        success: false,
+        error: `No user document found for userId: ${userId}`,
+      });
+    }
+
+    const userData = userDocSnap.data();
+    console.log("Document data:", JSON.stringify(userData, null, 2));
+
+    // Return the userDoc in a success response
+    console.log("Returning success response with user data.");
+    return res.status(200).json({
+      success: true,
+      userDoc: userData,
+    });
+  } catch (error) {
+    console.error("Error fetching user document:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      details: error.message,
+    });
+  }
+});
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);

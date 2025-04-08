@@ -1416,21 +1416,28 @@ exports.cloneToeflBooksOnUserCreate = onDocumentCreated(
 
     logger.info(`User created => ${userId}`);
 
-    const standardBookIds = [
+    // The first four IDs are normal TOEFL clones, the 5th ID is used for onboarding.
+    const normalToeflBookIds = [
       "1z4qCTiEWZP7DgDAUKCA",
       "1z4qCTiEWZP7DgDAUKCA",
       "1z4qCTiEWZP7DgDAUKCA",
       "1z4qCTiEWZP7DgDAUKCA",
     ];
+    const onboardingBookId = "TzRE8i7VrcoTdlrnelvT"; // 5th book
 
-    const cloneFunctionURL =
-      "https://us-central1-comm-app-ff74b.cloudfunctions.net/cloneStandardBook";
+    const cloneFunctionURL = "https://us-central1-comm-app-ff74b.cloudfunctions.net/cloneStandardBook";
+    const planFunctionURL  = "https://us-central1-comm-app-ff74b.cloudfunctions.net/generateOnboardingPlan";
 
-    const clonedResults = [];
+    // We'll store the results separately
+    const clonedToeflBooks = [];
+    let onboardingBook = null; // single object for the 5th book
 
     try {
-      for (const stdBookId of standardBookIds) {
-        const resp = await fetch(cloneFunctionURL, {
+      //----------------------------------------------------------------------
+      // 1) Clone the first four TOEFL books
+      //----------------------------------------------------------------------
+      for (const stdBookId of normalToeflBookIds) {
+        const cloneResp = await fetch(cloneFunctionURL, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1439,20 +1446,91 @@ exports.cloneToeflBooksOnUserCreate = onDocumentCreated(
           }),
         });
 
-        if (!resp.ok) {
-          const text = await resp.text();
-          throw new Error(`Clone request failed: ${resp.status} => ${text}`);
+        if (!cloneResp.ok) {
+          const text = await cloneResp.text();
+          throw new Error(`Clone request failed: ${cloneResp.status} => ${text}`);
         }
-        const data = await resp.json();
-        clonedResults.push({ oldBookId: stdBookId, newBookId: data.newBookId });
+
+        const cloneData = await cloneResp.json();
+        const newBookId = cloneData.newBookId;
+
+        // Fetch book name from Firestore
+        const bookDoc = await admin
+          .firestore()
+          .collection("books_demo")
+          .doc(stdBookId)
+          .get();
+        const bookName = bookDoc.exists ? bookDoc.data().name : null;
+
+        clonedToeflBooks.push({
+          oldBookId: stdBookId,
+          newBookId,
+          bookName,
+        });
       }
 
+      //----------------------------------------------------------------------
+      // 2) Clone the fifth book => also create a plan => store in onboardingBook
+      //----------------------------------------------------------------------
+      {
+        const cloneResp = await fetch(cloneFunctionURL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            standardBookId: onboardingBookId,
+            targetUserId: userId,
+          }),
+        });
+
+        if (!cloneResp.ok) {
+          const text = await cloneResp.text();
+          throw new Error(`Fifth-book clone failed: ${cloneResp.status} => ${text}`);
+        }
+        const cloneData = await cloneResp.json();
+        const newBookId = cloneData.newBookId;
+
+        // Fetch book name from Firestore
+        const bookDoc = await admin
+          .firestore()
+          .collection("books_demo")
+          .doc(onboardingBookId)
+          .get();
+        const bookName = bookDoc.exists ? bookDoc.data().name : null;
+
+        // Generate plan
+        const planResp = await fetch(
+          `${planFunctionURL}?userId=${userId}&bookId=${newBookId}&targetDate=2025-12-31`,
+          { method: "POST" }
+        );
+        if (!planResp.ok) {
+          const text = await planResp.text();
+          throw new Error(`Plan creation failed: ${planResp.status} => ${text}`);
+        }
+        const planData = await planResp.json();
+        const planId = planData.planId || null;
+
+        // Build the single onboardingBook object
+        onboardingBook = {
+          oldBookId: onboardingBookId,
+          newBookId,
+          bookName,
+          planId,
+        };
+      }
+
+      //----------------------------------------------------------------------
+      // 3) Update user document => store both arrays
+      //----------------------------------------------------------------------
       await event.data.ref.update({
-        clonedToeflBooks: clonedResults,
+        clonedToeflBooks,       // array with first 4
+        onboardingBook,         // single object for the 5th
         updatedAt: Date.now(),
       });
 
-      logger.info("Cloned results:", clonedResults);
+      logger.info("Cloned results =>", {
+        clonedToeflBooks,
+        onboardingBook,
+      });
     } catch (err) {
       logger.error("Clone error:", err);
     }
@@ -6245,3 +6323,216 @@ function toMillis(ts) {
   }
   return 0;
 }
+
+
+
+exports.generateOnboardingPlan = onRequest(async (req, res) => {
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Headers", "Content-Type,Authorization");
+  res.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).send("");
+  }
+
+  try {
+    // 1) Basic Input
+    const userId = req.query.userId || req.body.userId;
+    if (!userId) {
+      return res.status(400).json({ error: "Missing userId." });
+    }
+
+    const bookId = req.query.bookId || req.body.bookId;
+    if (!bookId) {
+      return res.status(400).json({ error: "Missing bookId." });
+    }
+
+    // Optionally, get a targetDate
+    const targetDateStr = req.query.targetDate || req.body.targetDate;
+    const targetDate = targetDateStr ? new Date(targetDateStr) : new Date();
+    if (!targetDateStr || isNaN(targetDate.getTime())) {
+      const fallbackDate = new Date();
+      fallbackDate.setDate(fallbackDate.getDate() + 7);
+      targetDate.setTime(fallbackDate.getTime());
+    }
+
+    // 2) Prepare references
+    const db = admin.firestore();
+
+    // 3) (Optional) fetch single chapter + subchapter
+    let chapterId = "";
+    let subChapterId = "";
+    let chapterName = "Onboarding Chapter";
+    let subChapterName = "Onboarding Subchapter";
+
+    const chaptersSnap = await db
+      .collection("chapters_demo")
+      .where("bookId", "==", bookId)
+      .limit(1)
+      .get();
+    if (!chaptersSnap.empty) {
+      const chDoc = chaptersSnap.docs[0];
+      chapterId = chDoc.id;
+      chapterName = chDoc.data().name || "Onboarding Chapter";
+
+      const subChSnap = await db
+        .collection("subchapters_demo")
+        .where("chapterId", "==", chapterId)
+        .limit(1)
+        .get();
+      if (!subChSnap.empty) {
+        const sDoc = subChSnap.docs[0];
+        subChapterId = sDoc.id;
+        subChapterName = sDoc.data().name || "Onboarding Subchapter";
+      }
+    }
+
+    if (!chapterId || !subChapterId) {
+      return res.status(400).json({
+        error: "Onboarding chapter or subchapter not found in that book.",
+      });
+    }
+
+    // 4) Build the single session with 7 tasks
+    const sessionLabel = "1";
+    const aggregatorStatus = "not-started";
+
+    // Adjust time as needed
+    const readingTimeNeeded = 5;
+    const quizTimeNeeded = 3;   // Not used now for quizzes
+    const guideTimeNeeded = 2;
+
+    const { v4: uuidv4 } = require("uuid");
+
+    const dayActivities = [
+      // 1) guide => onboarding
+      {
+        activityId: uuidv4(),
+        type: "guide",
+        guideType: "onboarding",
+        aggregatorStatus,
+        timeNeeded: guideTimeNeeded,
+        bookId,
+        chapterId,
+        chapterName,
+        subChapterId,
+        subChapterName,
+      },
+      // 2) guide => reading
+      {
+        activityId: uuidv4(),
+        type: "guide",
+        guideType: "reading",
+        aggregatorStatus,
+        timeNeeded: guideTimeNeeded,
+        bookId,
+        chapterId,
+        chapterName,
+        subChapterId,
+        subChapterName,
+      },
+      // 3) actual reading
+      {
+        activityId: uuidv4(),
+        type: "READ",
+        aggregatorStatus,
+        timeNeeded: readingTimeNeeded,
+        bookId,
+        chapterId,
+        chapterName,
+        subChapterId,
+        subChapterName,
+      },
+      // 4) guide => remember
+      {
+        activityId: uuidv4(),
+        type: "guide",
+        guideType: "remember",
+        aggregatorStatus,
+        timeNeeded: guideTimeNeeded,
+        bookId,
+        chapterId,
+        chapterName,
+        subChapterId,
+        subChapterName,
+      },
+      // 5) guide => understand
+      {
+        activityId: uuidv4(),
+        type: "guide",
+        guideType: "understand",
+        aggregatorStatus,
+        timeNeeded: guideTimeNeeded,
+        bookId,
+        chapterId,
+        chapterName,
+        subChapterId,
+        subChapterName,
+      },
+      // 6) guide => apply
+      {
+        activityId: uuidv4(),
+        type: "guide",
+        guideType: "apply",
+        aggregatorStatus,
+        timeNeeded: guideTimeNeeded,
+        bookId,
+        chapterId,
+        chapterName,
+        subChapterId,
+        subChapterName,
+      },
+      // 7) guide => analyze
+      {
+        activityId: uuidv4(),
+        type: "guide",
+        guideType: "analyze",
+        aggregatorStatus,
+        timeNeeded: guideTimeNeeded,
+        bookId,
+        chapterId,
+        chapterName,
+        subChapterId,
+        subChapterName,
+      },
+    ];
+
+    // Only one session in the array:
+    const sessions = [
+      {
+        sessionLabel,
+        stageBucket: "onboarding",
+        activities: dayActivities,
+      },
+    ];
+
+    // 5) Build the planDoc
+    const planDoc = {
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      planName: `Onboarding Plan for User ${userId}`,
+      userId,
+      targetDate: targetDate.toISOString().split("T")[0],
+      sessions,
+      maxDayCount: 1,
+      wpmUsed: 200,
+      dailyReadingTimeUsed: 10,
+      level: "onboarding",
+      bookId,
+      examId: "general",
+      onboardingPlan: true, // <<--- ADDED
+      logDetails: ["Onboarding plan with 7 tasks (no quizzes)."],
+    };
+
+    // 6) Write to Firestore
+    const newRef = await db.collection("adaptive_demo").add(planDoc);
+
+    return res.status(200).json({
+      message: "Successfully generated ONBOARDING plan with 7 tasks, no quizzes.",
+      planId: newRef.id,
+      planDoc,
+    });
+  } catch (error) {
+    console.error("Error in generateOnboardingPlan:", error);
+    return res.status(500).json({ error: error.message });
+  }
+});
