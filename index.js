@@ -5212,6 +5212,90 @@ app.get("/api/daily-time", async (req, res) => {
   }
 });
 
+app.get("/api/daily-time-all", async (req, res) => {
+  const { userId } = req.query;
+  if (!userId) {
+    return res.json({ success: false, message: "Missing userId" });
+  }
+
+  try {
+    const db = admin.firestore();
+    // Query all dailyTimeRecords for the user
+    const snapshot = await db
+      .collection("dailyTimeRecords")
+      .where("userId", "==", userId)
+      .get();
+
+    // We'll group by dateStr => sum of totalSeconds
+    const map = new Map();
+    snapshot.forEach((doc) => {
+      const data = doc.data();
+      const dateStr = data.dateStr;
+      const sec = data.totalSeconds || 0;
+      if (!map.has(dateStr)) {
+        map.set(dateStr, sec);
+      } else {
+        map.set(dateStr, map.get(dateStr) + sec);
+      }
+    });
+
+    // Build an array of { dateStr, sumSeconds }
+    const records = [];
+    map.forEach((val, key) => {
+      records.push({ dateStr: key, sumSeconds: val });
+    });
+
+    return res.json({ success: true, records });
+  } catch (err) {
+    console.error("Error in /daily-time-all:", err);
+    return res.json({ success: false, message: err.message });
+  }
+});
+
+app.get("/api/user", async (req, res) => {
+  const { userId } = req.query;
+  if (!userId) {
+    return res.json({ success: false, message: "Missing userId" });
+  }
+
+  try {
+    const db = admin.firestore();
+    // If doc ID == userId, we do .doc(userId) not .where("userId","==",userId)
+    const docRef = db.collection("users").doc(userId);
+    const snapshot = await docRef.get();
+
+    if (!snapshot.exists) {
+      return res.json({ success: false, message: "User not found." });
+    }
+
+    const userData = snapshot.data() || {};
+    // e.g. userData = { username: "someone@example.com", createdAt: <timestamp> }
+
+    // Convert Firestore Timestamp => ISO string if needed
+    let createdAtStr = null;
+    if (userData.createdAt && userData.createdAt.toDate) {
+      createdAtStr = userData.createdAt.toDate().toISOString();
+    } else if (userData.createdAt) {
+      // If it's already a string or Date
+      createdAtStr = userData.createdAt;
+    }
+
+    return res.json({
+      success: true,
+      user: {
+        username: userData.username || "unknown@example.com",
+        createdAt: createdAtStr,
+      },
+    });
+  } catch (err) {
+    console.error("Error in GET /api/user:", err);
+    return res.json({ success: false, message: err.message });
+  }
+});
+
+
+
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
