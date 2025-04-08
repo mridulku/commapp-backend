@@ -5179,6 +5179,39 @@ app.get("/userDoc", async (req, res) => {
   }
 });
 
+
+app.get("/api/daily-time", async (req, res) => {
+  const { userId, dateStr } = req.query;
+  if (!userId || !dateStr) {
+    return res.json({
+      success: false,
+      message: "Missing userId or dateStr query params",
+    });
+  }
+
+  try {
+    const db = admin.firestore();
+
+    // Query dailyTimeRecords for all docs matching userId + dateStr
+    const snapshot = await db
+      .collection("dailyTimeRecords")
+      .where("userId", "==", userId)
+      .where("dateStr", "==", dateStr)
+      .get();
+
+    let sumSeconds = 0;
+    snapshot.forEach((doc) => {
+      const data = doc.data();
+      sumSeconds += data.totalSeconds || 0;
+    });
+
+    return res.json({ success: true, sumSeconds });
+  } catch (err) {
+    console.error("Error in GET /daily-time:", err);
+    return res.json({ success: false, message: err.message });
+  }
+});
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);

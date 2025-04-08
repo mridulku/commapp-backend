@@ -1418,12 +1418,12 @@ exports.cloneToeflBooksOnUserCreate = onDocumentCreated(
 
     // The first four IDs are normal TOEFL clones, the 5th ID is used for onboarding.
     const normalToeflBookIds = [
-      "1z4qCTiEWZP7DgDAUKCA",
-      "1z4qCTiEWZP7DgDAUKCA",
-      "1z4qCTiEWZP7DgDAUKCA",
-      "1z4qCTiEWZP7DgDAUKCA",
+      "xaVdzaHkVzpqZEV3IeQ2",
+      "u4Ab23W4N9ZovZRx23x2",
+      "q0VM4VMUs9soKGHPWaHy",
+      "lXbQlaTXvvQLDSiJxCCh",
     ];
-    const onboardingBookId = "TzRE8i7VrcoTdlrnelvT"; // 5th book
+    const onboardingBookId = "Z2mBZLc9oDdcH60ltNPk"; // 5th book
 
     const cloneFunctionURL = "https://us-central1-comm-app-ff74b.cloudfunctions.net/cloneStandardBook";
     const planFunctionURL  = "https://us-central1-comm-app-ff74b.cloudfunctions.net/generateOnboardingPlan";
@@ -6405,6 +6405,18 @@ exports.generateOnboardingPlan = onRequest(async (req, res) => {
     const { v4: uuidv4 } = require("uuid");
 
     const dayActivities = [
+      {
+        activityId: uuidv4(),
+        type: "guide",
+        guideType: "carousel",
+        aggregatorStatus,
+        timeNeeded: guideTimeNeeded,
+        bookId,
+        chapterId,
+        chapterName,
+        subChapterId,
+        subChapterName,
+      },
       // 1) guide => onboarding
       {
         activityId: uuidv4(),
