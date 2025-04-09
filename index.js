@@ -3964,6 +3964,9 @@ const QUIZ_STAGES = ["remember", "understand", "apply", "analyze"];
 
 
 
+// File: subchapter-status.js (or wherever your Express route is defined)
+
+// 1) The /subchapter-status endpoint
 app.get("/subchapter-status", async (req, res) => {
   try {
     // 1) Parse query
@@ -3975,7 +3978,7 @@ app.get("/subchapter-status", async (req, res) => {
       return res.status(400).json({ error: "Missing userId, planId, or subchapterId" });
     }
 
-    // 2) Build readingStats => merges reading_demo + readingSubActivity lumps
+    // 2) readingStats => merges reading_demo + readingSubActivity lumps
     console.log("[/subchapter-status] calling buildReadingStatsSingle...");
     const readingStatsMap = await buildReadingStatsSingle(userId, planId);
     console.log("[/subchapter-status] readingStatsMap =>", readingStatsMap);
@@ -3988,8 +3991,8 @@ app.get("/subchapter-status", async (req, res) => {
     console.log("[/subchapter-status] readingSummary =>", readingSummary);
 
     // 3) For each QUIZ_STAGE => gather aggregator data + status
-    const quizStagesData = {};    // full aggregator data (quizAttempts, etc.)
-    const quizStagesStatus = {};  // partial status (overall, masteryPct, etc.)
+    const quizStagesData = {};    // FULL aggregator object (quizAttempts, revisionAttempts, etc.)
+    const quizStagesStatus = {};  // PARTIAL status => { overall, masteryPct, etc. }
 
     console.log("[/subchapter-status] building quizStages for QUIZ_STAGES =>", QUIZ_STAGES);
 
@@ -3998,28 +4001,30 @@ app.get("/subchapter-status", async (req, res) => {
       const stageData = await gatherStageDataSingle(userId, planId, subchapterId, stage);
       console.log(`[/subchapter-status] stageData =>`, stageData);
 
-      const stageStatus = getStageStatus(stageData); 
+      const stageStatus = getStageStatus(stageData);
       console.log(`[/subchapter-status] stageStatus => '${stage}':`, stageStatus);
 
-      quizStagesData[stage]   = stageData;   // store the raw aggregator object
-      quizStagesStatus[stage] = stageStatus; // store the simplified status
+      // Store them
+      quizStagesData[stage]   = stageData;   // the raw aggregator details
+      quizStagesStatus[stage] = stageStatus; // simplified "overall", "masteryPct", etc.
     }
     console.log("[/subchapter-status] final quizStagesStatus =>", quizStagesStatus);
 
-    // 4) Combine reading + quiz stages => locked/unlocked logic + next tasks
+    // 4) Combine reading + quiz => locked/unlocked logic + next tasks
     console.log("[/subchapter-status] calling buildTaskInfoV2...");
     const taskInfo = buildTaskInfoV2(readingSummary, quizStagesData, quizStagesStatus);
     console.log("[/subchapter-status] final taskInfo =>", taskInfo);
 
-    // 5) Return final
+    // 5) Return final => we now also return quizStagesData
     console.log("[/subchapter-status] returning success => subchapterId:", subchapterId);
     return res.json({
       userId,
       planId,
       subchapterId,
-      readingSummary,  // e.g. { overall: "done", timeSpent, completionDate }
-      quizStages: quizStagesStatus, // or rename => e.g. "quizStagesStatus"
-      taskInfo,       // e.g. array with Reading, Remember, Understand, Apply, Analyze
+      readingSummary,            // e.g. { overall: "done", timeSpent, completionDate }
+      quizStages: quizStagesStatus, 
+      quizStagesData,            // <--- ADDED: raw aggregator data for each stage
+      taskInfo,                  // e.g. array with Reading, Remember, Understand, Apply, Analyze
     });
   } catch (err) {
     console.error("[/subchapter-status] error =>", err);
@@ -4027,6 +4032,7 @@ app.get("/subchapter-status", async (req, res) => {
   }
 });
 
+// 2) The gatherStageDataSingle function
 async function gatherStageDataSingle(userId, planId, subChId, stage) {
   console.log("[gatherStageDataSingle] userId =", userId, 
               "planId =", planId, 
@@ -4036,7 +4042,7 @@ async function gatherStageDataSingle(userId, planId, subChId, stage) {
   const dbRef = admin.firestore();
 
   // 1) Quizzes
-  console.log("[gatherStageDataSingle] => Querying 'quizzes_demo' collection...");
+  console.log("[gatherStageDataSingle] => Querying 'quizzes_demo'...");
   const quizSnap = await dbRef
     .collection("quizzes_demo")
     .where("userId", "==", userId)
@@ -4059,7 +4065,7 @@ async function gatherStageDataSingle(userId, planId, subChId, stage) {
   });
 
   // 2) Revisions
-  console.log("[gatherStageDataSingle] => Querying 'revisions_demo' collection...");
+  console.log("[gatherStageDataSingle] => Querying 'revisions_demo'...");
   const revSnap = await dbRef
     .collection("revisions_demo")
     .where("userId", "==", userId)
@@ -4136,19 +4142,11 @@ async function gatherStageDataSingle(userId, planId, subChId, stage) {
     conceptArr.push({ name });
   });
   totalConceptCount = conceptArr.length;
-  console.log(
-    "[gatherStageDataSingle] conceptArr =>",
-    conceptArr,
-    "totalConceptCount =>",
-    totalConceptCount
-  );
+  console.log("[gatherStageDataSingle] conceptArr =>", conceptArr, "totalConceptCount =>", totalConceptCount);
 
   // 5) Build concept stats => same approach as aggregator
   const allAttemptsConceptStats = buildAllAttemptsConceptStats(quizAttempts, conceptArr);
-  console.log(
-    "[gatherStageDataSingle] allAttemptsConceptStats =>",
-    JSON.stringify(allAttemptsConceptStats, null, 2)
-  );
+  console.log("[gatherStageDataSingle] allAttemptsConceptStats =>", JSON.stringify(allAttemptsConceptStats, null, 2));
 
   // Return aggregator-like object
   const result = {
@@ -4162,7 +4160,6 @@ async function gatherStageDataSingle(userId, planId, subChId, stage) {
 
   return result;
 }
-
 
 async function buildReadingStatsSingle(userId, planId) {
   const result = {};
@@ -4843,7 +4840,7 @@ app.get("/api/getActivityTime", async (req, res) => {
     }
 
     let totalTime = 0;
-    let details = []; // <-- NEW: array of doc-specific info
+    let details = []; // array of doc-specific info
 
     if (type === "read") {
       // 1) readingSubActivity
@@ -4858,14 +4855,16 @@ app.get("/api/getActivityTime", async (req, res) => {
         const sec = docData.totalSeconds || 0;
         sum += sec;
 
-        // build an item in details array
+        // define dateStr from docData if it exists
+        const dateStr = docData.dateStr || null;
+
         details.push({
           docId: docSnap.id,
           collection: "readingSubActivity",
           totalSeconds: sec,
-          lumps: docData.lumps || [],   // if lumps array exists
-          // you can include any other fields you want
+          lumps: docData.lumps || [],   // partial intervals if any
           createdAt: docData.createdAt || null,
+          dateStr, // now included
         });
       });
       totalTime = sum;
@@ -4886,12 +4885,16 @@ app.get("/api/getActivityTime", async (req, res) => {
         const sec = docData.totalSeconds || 0;
         quizTimeSum += sec;
 
+        // define dateStr
+        const dateStr = docData.dateStr || null;
+
         details.push({
           docId: docSnap.id,
           collection: "quizTimeSubActivity",
           totalSeconds: sec,
           lumps: docData.lumps || [],
           createdAt: docData.createdAt || null,
+          dateStr,
         });
       });
 
@@ -4906,12 +4909,16 @@ app.get("/api/getActivityTime", async (req, res) => {
         const sec = docData.totalSeconds || 0;
         reviseTimeSum += sec;
 
+        // define dateStr
+        const dateStr = docData.dateStr || null;
+
         details.push({
           docId: docSnap.id,
           collection: "reviseTimeSubActivity",
           totalSeconds: sec,
           lumps: docData.lumps || [],
           createdAt: docData.createdAt || null,
+          dateStr,
         });
       });
 
