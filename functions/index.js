@@ -3633,8 +3633,8 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     const finalIdx = stIndex(finalStage);
 
     function maybeReadingTask(subCh, agg) {
+      // aggregator says "reading" is not done => we create a READ task
       if (!agg || agg.reading !== "done") {
-        // aggregator says "not done"
         const readTime = subCh.wordCount
           ? Math.ceil(subCh.wordCount / finalWpm)
           : 5;
@@ -3663,9 +3663,7 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
         return {
           type: "QUIZ",
           quizStage: stageKey,
-          aggregatorStatus: agg
-            ? agg[stageKey] || "not-started"
-            : "not-started",
+          aggregatorStatus: agg ? agg[stageKey] || "not-started" : "not-started",
           timeNeeded: quizTimeOverride,
         };
       }
@@ -3673,7 +3671,7 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     }
 
     // We'll keep different arrays for each stage "bucket"
-    const bucketReadingRemember = []; // read + remember combined
+    const bucketReadingRemember = [];
     const bucketUnderstand = [];
     const bucketApply = [];
     const bucketAnalyze = [];
@@ -3686,12 +3684,11 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
           const subChId = subCh.id;
           const aggEntry = aggregatorResult[subChId] || null;
 
-          // reading
+          // 1) reading
           const rd = maybeReadingTask(subCh, aggEntry);
           if (rd) {
             bucketReadingRemember.push({
-              // assign a new activityId here
-              activityId: uuidv4(), //<-- NEW
+              activityId: uuidv4(),
               ...rd,
               bookId: book.id,
               bookName: book.name || "",
@@ -3702,11 +3699,11 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
             });
           }
 
-          // remember
+          // 2) remember
           const rem = maybeRememberTask(subCh, aggEntry);
           if (rem) {
             bucketReadingRemember.push({
-              activityId: uuidv4(), //<-- NEW
+              activityId: uuidv4(),
               ...rem,
               bookId: book.id,
               bookName: book.name || "",
@@ -3717,7 +3714,7 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
             });
           }
 
-          // other quiz stages
+          // 3) other quiz stages (understand/apply/analyze)
           for (const stageKey of examConfig.stages) {
             if (stageKey === "reading" || stageKey === "remember") continue;
             const idx = stIndex(stageKey);
@@ -3727,7 +3724,7 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
             if (!qz) continue;
 
             const item = {
-              activityId: uuidv4(), //<-- NEW
+              activityId: uuidv4(),
               ...qz,
               bookId: book.id,
               bookName: book.name || "",
@@ -3736,7 +3733,6 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
               subChapterId: subChId,
               subChapterName: subCh.name || "",
             };
-            // Bucket them
             if (stageKey === "understand") {
               bucketUnderstand.push(item);
             } else if (stageKey === "apply") {
@@ -3751,20 +3747,23 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
 
     logDetails.push(
       `Bucket sizes => reading+remember=${bucketReadingRemember.length},` +
-        ` understand=${bucketUnderstand.length}, apply=${bucketApply.length}, analyze=${bucketAnalyze.length}`
+      ` understand=${bucketUnderstand.length}, apply=${bucketApply.length}, analyze=${bucketAnalyze.length}`
     );
 
     // ---------------------
-    // H) Distribute tasks: All reading+remember first, etc.
+    // H) Distribute tasks in one single pass (no forced day gaps)
     // ---------------------
     const sessions = [];
     let dayIndex = 1;
 
-    function distributeBucket(bucketTasks, stageName) {
-      let localTasks = [...bucketTasks];
+    function distributeTasks(allTasks) {
+      let localTasks = [...allTasks];
+
       while (localTasks.length > 0 && dayIndex <= maxDayCount) {
         let timeUsed = 0;
         let dayActivities = [];
+
+        // Fill up the day with as many tasks as fit
         while (localTasks.length > 0) {
           const leftover = finalDailyReadingTime - timeUsed;
           if (leftover <= 0) break;
@@ -3779,46 +3778,35 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
             break;
           }
         }
+
+        // If no tasks fit at all, skip this day
         if (dayActivities.length === 0) {
           dayIndex++;
           continue;
         }
+
+        // We scheduled something for this day
         sessions.push({
-          sessionLabel: dayIndex.toString(),
-          stageBucket: stageName,
+          sessionLabel: String(dayIndex),
           activities: dayActivities,
         });
+
         dayIndex++;
       }
+
       return localTasks.length; // leftover
     }
 
-    // 1) reading+remember
-    let remaining = distributeBucket(bucketReadingRemember, "reading+remember");
-    logDetails.push(`reading+remember => leftover: ${remaining}`);
+    // Merge tasks in the logical order: reading+remember => understand => apply => analyze
+    const allTasksInOrder = [
+      ...bucketReadingRemember,
+      ...bucketUnderstand,
+      ...bucketApply,
+      ...bucketAnalyze
+    ];
 
-    // next day gap
-    dayIndex++;
-
-    // 2) understand
-    remaining = distributeBucket(bucketUnderstand, "understand");
-    logDetails.push(`understand => leftover: ${remaining}`);
-
-    // next day gap
-    dayIndex++;
-
-    // 3) apply
-    remaining = distributeBucket(bucketApply, "apply");
-    logDetails.push(`apply => leftover: ${remaining}`);
-
-    // next day gap
-    dayIndex++;
-
-    // 4) analyze
-    remaining = distributeBucket(bucketAnalyze, "analyze");
-    logDetails.push(`analyze => leftover: ${remaining}`);
-
-    // ... more stages if needed
+    let leftover = distributeTasks(allTasksInOrder);
+    logDetails.push(`All tasks => leftover: ${leftover}`);
 
     // ---------------------
     // I) Write final plan doc
@@ -3848,7 +3836,7 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     const newRef = await db.collection("adaptive_demo").add(planDoc);
 
     return res.status(200).json({
-      message: "Successfully generated plan (v2) with chunked scheduling.",
+      message: "Successfully generated plan (v2) with chunked scheduling (no forced day gaps).",
       planId: newRef.id,
       planDoc,
     });
