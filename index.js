@@ -4015,7 +4015,23 @@ app.get("/subchapter-status", async (req, res) => {
     const taskInfo = buildTaskInfoV2(readingSummary, quizStagesData, quizStagesStatus);
     console.log("[/subchapter-status] final taskInfo =>", taskInfo);
 
-    // 5) Return final => we now also return quizStagesData
+    // 5) FETCH CONCEPTS for subchapter
+    console.log("[/subchapter-status] fetching subchapterConcepts => subChId=", subchapterId);
+    const conceptSnap = await db
+      .collection("subchapterConcepts")
+      .where("subChapterId", "==", subchapterId)
+      .get();
+
+    const concepts = [];
+    conceptSnap.forEach((docSnap) => {
+      concepts.push({
+        id: docSnap.id,
+        ...docSnap.data(),
+      });
+    });
+    console.log("[/subchapter-status] found concepts =>", concepts.map(c=>c.id));
+
+    // 6) Return final => now also returning quizStagesData + concepts
     console.log("[/subchapter-status] returning success => subchapterId:", subchapterId);
     return res.json({
       userId,
@@ -4023,8 +4039,9 @@ app.get("/subchapter-status", async (req, res) => {
       subchapterId,
       readingSummary,            // e.g. { overall: "done", timeSpent, completionDate }
       quizStages: quizStagesStatus, 
-      quizStagesData,            // <--- ADDED: raw aggregator data for each stage
-      taskInfo,                  // e.g. array with Reading, Remember, Understand, Apply, Analyze
+      quizStagesData,            // raw aggregator data for each stage
+      taskInfo,                  // e.g. array for Reading/Remember/Understand/Apply/Analyze
+      concepts,                  // <--- new array of subchapterConcepts
     });
   } catch (err) {
     console.error("[/subchapter-status] error =>", err);
