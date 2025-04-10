@@ -4881,7 +4881,12 @@ app.get("/api/getActivityTime", async (req, res) => {
           totalSeconds: sec,
           lumps: docData.lumps || [],   // partial intervals if any
           createdAt: docData.createdAt || null,
-          dateStr, // now included
+          dateStr,
+          // NEW FIELDS:
+          subChapterId: docData.subChapterId || null,
+          // Possibly userId, planId if you want:
+          userId: docData.userId || null,
+          planId: docData.planId || null,
         });
       });
       totalTime = sum;
@@ -4902,7 +4907,6 @@ app.get("/api/getActivityTime", async (req, res) => {
         const sec = docData.totalSeconds || 0;
         quizTimeSum += sec;
 
-        // define dateStr
         const dateStr = docData.dateStr || null;
 
         details.push({
@@ -4912,6 +4916,12 @@ app.get("/api/getActivityTime", async (req, res) => {
           lumps: docData.lumps || [],
           createdAt: docData.createdAt || null,
           dateStr,
+          // NEW FIELDS:
+          attemptNumber: docData.attemptNumber || null,
+          quizStage: docData.quizStage || null,
+          subChapterId: docData.subChapterId || null,
+          userId: docData.userId || null,
+          planId: docData.planId || null,
         });
       });
 
@@ -4926,7 +4936,6 @@ app.get("/api/getActivityTime", async (req, res) => {
         const sec = docData.totalSeconds || 0;
         reviseTimeSum += sec;
 
-        // define dateStr
         const dateStr = docData.dateStr || null;
 
         details.push({
@@ -4936,6 +4945,12 @@ app.get("/api/getActivityTime", async (req, res) => {
           lumps: docData.lumps || [],
           createdAt: docData.createdAt || null,
           dateStr,
+          // NEW FIELDS:
+          revisionNumber: docData.revisionNumber || null,
+          quizStage: docData.quizStage || null,
+          subChapterId: docData.subChapterId || null,
+          userId: docData.userId || null,
+          planId: docData.planId || null,
         });
       });
 
@@ -4945,7 +4960,7 @@ app.get("/api/getActivityTime", async (req, res) => {
       return res.status(400).json({ error: "Unsupported type." });
     }
 
-    // Return totalTime + doc-level details
+    // Return totalTime + doc-level details (with new fields)
     return res.json({
       totalTime,
       details,
