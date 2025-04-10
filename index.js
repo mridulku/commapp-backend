@@ -4077,7 +4077,8 @@ async function gatherStageDataSingle(userId, planId, subChId, stage) {
       attemptNumber: d.attemptNumber || 1,
       score: d.score || 0,
       quizSubmission: d.quizSubmission || [],
-      timestamp: d.timestamp || null,
+      timestamp: d.timestamp || null,          // <-- ensure we carry over the doc's timestamp
+      type: "quiz",                            // <-- add 'type' so front-end sees "quiz"
     });
   });
 
@@ -4098,7 +4099,8 @@ async function gatherStageDataSingle(userId, planId, subChId, stage) {
     console.log("[gatherStageDataSingle] revision doc =>", docSnap.id, d);
     revisionAttempts.push({
       revisionNumber: d.revisionNumber || 1,
-      timestamp: d.timestamp || null,
+      timestamp: d.timestamp || null,          // <-- carry over revision doc's timestamp
+      type: "revision",                        // <-- add 'type' so front-end sees "revision"
     });
   });
 
