@@ -4645,42 +4645,43 @@ app.post("/api/setCompletionStatus", async (req, res) => {
  * If completionStatus="deferred", automatically replicate this activity
  * to the next session (creating a new session if needed).
  */
+// File: markActivityCompletion.js (or inline in your Express setup)
 app.post("/api/markActivityCompletion", async (req, res) => {
   try {
-    const { userId, planId, activityId, completionStatus } = req.body;
+    const { userId, planId, activityId, completed, replicaIndex } = req.body;
 
     // 1) Validate input
-    if (!userId || !planId || !activityId || !completionStatus) {
+    //    - 'completed' should be boolean
+    if (!userId || !planId || !activityId || typeof completed !== "boolean") {
       return res.status(400).json({
-        error: "Missing userId, planId, activityId, or completionStatus."
+        error: "Missing or invalid fields: userId, planId, activityId, completed(boolean)."
       });
     }
 
-    // 2) Get the plan doc from "adaptive_demo" collection
+    // 2) Load plan doc from 'adaptive_demo'
     const planRef = db.collection("adaptive_demo").doc(planId);
     const planSnap = await planRef.get();
     if (!planSnap.exists) {
-      return res.status(404).json({
-        error: `No plan found with planId='${planId}'`
-      });
+      return res.status(404).json({ error: `No plan found with planId='${planId}'` });
     }
 
-    // 3) Optionally enforce ownership
     const planData = planSnap.data();
     if (planData.userId !== userId) {
       return res.status(403).json({
         error: "You do not have permission to modify this plan."
       });
     }
-
     if (!Array.isArray(planData.sessions)) {
       planData.sessions = [];
     }
 
-    // 4) Locate the matching activity by activityId
+    // 3) Find the matching activity => match by activityId AND (replicaIndex or 0)
+    const requestedReplica = typeof replicaIndex === "number" ? replicaIndex : 0;
+
     let foundSessionIndex = -1;
     let foundActivityIndex = -1;
 
+    outerLoop: 
     for (let sIdx = 0; sIdx < planData.sessions.length; sIdx++) {
       const session = planData.sessions[sIdx];
       if (!Array.isArray(session.activities)) continue;
@@ -4688,62 +4689,32 @@ app.post("/api/markActivityCompletion", async (req, res) => {
       for (let aIdx = 0; aIdx < session.activities.length; aIdx++) {
         const act = session.activities[aIdx];
         if (act.activityId === activityId) {
-          // 5) Update the completionStatus
-          act.completionStatus = completionStatus;
-
-          // Mark indexes so we can replicate if needed
-          foundSessionIndex = sIdx;
-          foundActivityIndex = aIdx;
-          break;
+          // If 'act.replicaIndex' is missing, treat it like 0
+          const actReplica = typeof act.replicaIndex === "number" ? act.replicaIndex : 0;
+          if (actReplica === requestedReplica) {
+            foundSessionIndex = sIdx;
+            foundActivityIndex = aIdx;
+            break outerLoop;
+          }
         }
       }
-      if (foundActivityIndex >= 0) break;
     }
 
     if (foundSessionIndex < 0 || foundActivityIndex < 0) {
       return res.status(404).json({
-        error: `Activity '${activityId}' not found in plan '${planId}'.`
+        error: `Activity '${activityId}' (replicaIndex=${requestedReplica}) not found in plan '${planId}'.`
       });
     }
 
-    // 6) If we just deferred this activity => replicate it to next session
-    if (completionStatus === "deferred") {
-      const lastSessionIndex = planData.sessions.length - 1;
-      let targetSessionIndex = foundSessionIndex + 1;
+    // 4) Set .completed
+    planData.sessions[foundSessionIndex].activities[foundActivityIndex].completed = completed;
 
-      // If there's no "next" session, create one
-      if (targetSessionIndex > lastSessionIndex) {
-        // optional: generate a sessionLabel or do something else
-        planData.sessions.push({
-          sessionLabel: `${planData.sessions.length + 1}`,
-          activities: [],
-        });
-        targetSessionIndex = planData.sessions.length - 1; // newly created
-      }
-
-      const originalActivity =
-        planData.sessions[foundSessionIndex].activities[foundActivityIndex];
-
-      // Make a deep copy
-      const newActivity = JSON.parse(JSON.stringify(originalActivity));
-
-      // Assign a new ID
-      const newUuid = uuidv4(); // import from 'uuid'
-      newActivity.activityId = newUuid;
-
-      // (Optionally) reset the status of the replicated copy
-      newActivity.completionStatus = null; // or "not-started"
-
-      // Insert at start of next session
-      planData.sessions[targetSessionIndex].activities.unshift(newActivity);
-    }
-
-    // 7) Save updated plan data back to Firestore
+    // 5) Save updated plan
     await planRef.set(planData, { merge: true });
 
-    // 8) Return success response
+    // 6) Return success
     return res.status(200).json({
-      message: `Activity '${activityId}' set to '${completionStatus}'.`,
+      message: `Activity '${activityId}' (replicaIndex=${requestedReplica}) set completed=${completed}.`,
       planId,
     });
   } catch (err) {
@@ -5361,7 +5332,9 @@ app.post("/api/markPlanAsAdapted", async (req, res) => {
       return res.status(400).json({ error: "sessionIndex must be a number" });
     }
 
-    console.log(`[markPlanAsAdapted] userId=${userId}, planId=${planId}, sessionIndex=${sessionIndex}`);
+    console.log(
+      `[markPlanAsAdapted] userId=${userId}, planId=${planId}, sessionIndex=${sessionIndex}`
+    );
 
     // 2) Load plan from 'adaptive_demo'
     const dbRef = admin.firestore();
@@ -5374,7 +5347,9 @@ app.post("/api/markPlanAsAdapted", async (req, res) => {
 
     const planData = snap.data();
     if (!planData.sessions) {
-      return res.status(400).json({ error: "Plan doc has no 'sessions' array." });
+      return res.status(400).json({
+        error: "Plan doc has no 'sessions' array."
+      });
     }
 
     // dailyReadingTimeUsed => e.g. 30 minutes
@@ -5388,7 +5363,7 @@ app.post("/api/markPlanAsAdapted", async (req, res) => {
       });
     }
 
-    // 4) aggregator logic for session #N => find incomplete tasks
+    // 4) aggregator logic => find incomplete tasks
     const sessionObj = planData.sessions[sessionIndex];
     if (!sessionObj.activities || sessionObj.activities.length === 0) {
       // If no activities => nothing to do
@@ -5398,7 +5373,7 @@ app.post("/api/markPlanAsAdapted", async (req, res) => {
       });
     }
 
-    // gather subchapter ids => aggregator calls
+    // Gather subchapter IDs => aggregator calls
     const uniqueSubChIds = new Set();
     sessionObj.activities.forEach((act) => {
       if (act.subChapterId) {
@@ -5416,8 +5391,8 @@ app.post("/api/markPlanAsAdapted", async (req, res) => {
     }
 
     // 5) Determine which tasks are incomplete
-    //    BUT we do NOT remove them from session #N.
-    //    We'll just make a copy for the next day or new session.
+    //    We do NOT remove them from session #N; we keep them as history.
+    //    We'll copy them forward with a new replicaIndex.
     const incompleteActs = [];
     sessionObj.activities.forEach((act) => {
       let isComplete = false;
@@ -5454,32 +5429,38 @@ app.post("/api/markPlanAsAdapted", async (req, res) => {
       }
     });
 
-    // 6) "Copy" these incomplete tasks into the next day or new day
-    //    Instead of removing them from session #N, we keep them there.
-    //    The next day gets duplicates so the user can re-attempt them.
+    // 6) "Copy" these incomplete tasks into next day or new day
     if (incompleteActs.length > 0) {
       const isLastSession = (sessionIndex === planData.sessions.length - 1);
 
       // We'll create a "copy" array for the next session
-      // because day #N remains the same
       const newCopies = incompleteActs.map((orig) => {
-        // Shallow copy. If you want to mutate something (like aggregatorStatus),
-        // you can do so here. Example:
+        // If there's no replicaIndex, assume 0
+        const oldReplica = typeof orig.replicaIndex === "number" ? orig.replicaIndex : 0;
+        const newIndex = oldReplica + 1; // increment
+
         return {
           ...orig,
-          // maybe aggregatorStatus: "carried-forward" or something
+          // NOTE: we keep same activityId
+          // but we set replicaIndex to oldReplica + 1
+          replicaIndex: newIndex,
+          // Also set completed to false on the copy
+          completed: false,
+          // aggregatorStatus / any other fields are optional
         };
       });
 
       if (isLastSession) {
-        // create a brand-new session with these tasks
+        // create brand-new session with these tasks
         const newSess = {
           sessionLabel: String(planData.sessions.length + 1),
           activities: newCopies,
         };
         planData.sessions.push(newSess);
         console.log(
-          `[markPlanAsAdapted] Created new session #${planData.sessions.length - 1} with ${newCopies.length} incomplete tasks (copied).`
+          `[markPlanAsAdapted] Created new session #${
+            planData.sessions.length - 1
+          } with ${newCopies.length} incomplete tasks (copied, with replicaIndex++).`
         );
       } else {
         // Prepend them to the next session's activities
@@ -5491,17 +5472,16 @@ app.post("/api/markPlanAsAdapted", async (req, res) => {
         console.log(
           `[markPlanAsAdapted] Copied ${newCopies.length} incomplete tasks to session #${
             sessionIndex + 1
-          }.`
+          } (replicaIndex++).`
         );
       }
     }
 
     // 7) Rebalance from sessionIndex+1 => onward
     //    so that each day’s sum of timeNeeded <= dailyLimit
-    // If you want to also re-check day #N, do "startRebalanceIndex = sessionIndex;"
     const startRebalanceIndex = sessionIndex + 1;
     if (startRebalanceIndex < planData.sessions.length) {
-      // gather all future tasks
+      // gather future tasks
       let allFutureActs = [];
       for (let i = startRebalanceIndex; i < planData.sessions.length; i++) {
         allFutureActs.push(...planData.sessions[i].activities);
@@ -5510,7 +5490,7 @@ app.post("/api/markPlanAsAdapted", async (req, res) => {
       // remove old sessions from that index onward
       planData.sessions.splice(startRebalanceIndex);
 
-      // Build new sessions day-by-day
+      // build new sessions day-by-day
       let newSessions = [];
       let currentActs = [];
       let currentTime = 0;
@@ -5518,12 +5498,12 @@ app.post("/api/markPlanAsAdapted", async (req, res) => {
       for (const a of allFutureActs) {
         const needed = a.timeNeeded || 0;
         if (currentTime + needed > dailyLimit) {
-          // finalize the current day
+          // finalize day
           newSessions.push({
             sessionLabel: String(planData.sessions.length + newSessions.length + 1),
             activities: currentActs,
           });
-          // start new day
+          // new day
           currentActs = [a];
           currentTime = needed;
         } else {
@@ -5539,11 +5519,11 @@ app.post("/api/markPlanAsAdapted", async (req, res) => {
         });
       }
 
-      // add these new sessions at the end
+      // add new sessions
       planData.sessions.push(...newSessions);
 
       console.log(
-        `[markPlanAsAdapted] Rebalanced from session #${startRebalanceIndex}, created ${newSessions.length} new sessions to respect dailyLimit=${dailyLimit}.`
+        `[markPlanAsAdapted] Rebalanced from session #${startRebalanceIndex}, created ${newSessions.length} new sessions (limit=${dailyLimit}).`
       );
     }
 
@@ -5556,13 +5536,14 @@ app.post("/api/markPlanAsAdapted", async (req, res) => {
 
     return res.json({
       success: true,
-      message: `Copied incomplete tasks from sessionIndex=${sessionIndex} into the next day. Then rebalanced from day #${startRebalanceIndex} with limit=${dailyLimit}.`,
+      message: `Copied incomplete tasks from sessionIndex=${sessionIndex} => next day (with replicaIndex). Then rebalanced from day #${startRebalanceIndex}.`,
     });
   } catch (err) {
     console.error("[markPlanAsAdapted] ERROR =>", err);
     return res.status(500).json({ error: err.message });
   }
 });
+
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
