@@ -5336,6 +5336,124 @@ app.get("/api/user", async (req, res) => {
 
 
 
+// Example: copy the plan doc from "plans" collection into "adaptive_demo" collection
+
+app.post("/api/markPlanAsAdapted", async (req, res) => {
+  console.log("[POST] /api/markPlanAsAdapted => HIT THIS ROUTE");
+  console.log("Request body =>", req.body);
+
+  try {
+    const { planId, userId, sessionIndexes } = req.body;
+
+    if (!planId || !userId) {
+      return res.status(400).json({ error: "Missing planId or userId" });
+    }
+
+    console.log(`[markPlanAsAdapted] userId=${userId}, planId=${planId}, sessionIndexes=${sessionIndexes}`);
+
+    // 1) Grab the plan doc from 'adaptive_demo'
+    const dbRef = admin.firestore();
+    const planRef = dbRef.collection("adaptive_demo").doc(planId);
+
+    const snap = await planRef.get();
+    if (!snap.exists) {
+      return res.status(404).json({ error: "Plan document not found in adaptive_demo." });
+    }
+
+    const planData = snap.data();
+    if (!planData.sessions) {
+      // If no sessions => just set adapted: true
+      await planRef.update({ adapted: true });
+      return res.json({
+        success: true,
+        message: `Plan doc ${planId} has no sessions, but marked adapted.`,
+      });
+    }
+
+    // 2) Determine which sessions to process
+    let targetSessionIndexes = [];
+    if (Array.isArray(sessionIndexes) && sessionIndexes.length > 0) {
+      // Use the provided array
+      targetSessionIndexes = sessionIndexes;
+    } else {
+      // If none provided => process all sessions
+      targetSessionIndexes = planData.sessions.map((_, idx) => idx);
+    }
+
+    // 3) Gather unique subchapter IDs from only the target sessions
+    const uniqueSubChIds = new Set();
+    targetSessionIndexes.forEach((sessIdx) => {
+      const sessionObj = planData.sessions[sessIdx];
+      if (!sessionObj || !sessionObj.activities) return;
+
+      sessionObj.activities.forEach((act) => {
+        if (act.subChapterId) {
+          uniqueSubChIds.add(act.subChapterId);
+        }
+      });
+    });
+
+    // 4) For each unique subchapter => call aggregator or subchapter-status
+    const subChStatusMap = {};
+    for (const subChId of uniqueSubChIds) {
+      const url = `http://localhost:3001/subchapter-status?userId=${userId}&planId=${planId}&subchapterId=${subChId}`;
+      console.log(`[markPlanAsAdapted] fetching aggregator => ${url}`);
+      const resp = await axios.get(url);
+      subChStatusMap[subChId] = resp.data;
+    }
+
+    // 5) For each target session => set completed = true/false on each activity
+    targetSessionIndexes.forEach((sessIdx) => {
+      const sessionObj = planData.sessions[sessIdx];
+      if (!sessionObj || !sessionObj.activities) return;
+
+      sessionObj.activities.forEach((act) => {
+        let isComplete = false;
+        const subChId = act.subChapterId;
+        if (!subChId || !subChStatusMap[subChId]) {
+          // aggregator data not found => default false
+          act.completed = false;
+          return;
+        }
+
+        const aggregatorResult = subChStatusMap[subChId];
+        const rawType = (act.type || "").toLowerCase();
+
+        if (rawType.includes("read")) {
+          // reading => aggregatorResult.readingSummary.overall === "done"
+          const readingOverall = aggregatorResult.readingSummary?.overall || "not-started";
+          if (readingOverall === "done") {
+            isComplete = true;
+          }
+        } else if (rawType.includes("quiz")) {
+          // quiz => aggregatorResult.quizStages[quizStage].overall === "done"
+          const stage = (act.quizStage || "").toLowerCase();
+          if (aggregatorResult.quizStages?.[stage]?.overall === "done") {
+            isComplete = true;
+          }
+        }
+
+        act.completed = isComplete;
+      });
+    });
+
+    // 6) Update the plan doc
+    await planRef.update({
+      sessions: planData.sessions,
+      adapted: true,
+      lastAdaptedAt: new Date(), // optional
+    });
+
+    return res.json({
+      success: true,
+      message: `Plan doc ${planId} updated for sessionIndexes=${JSON.stringify(targetSessionIndexes)}.`,
+    });
+  } catch (err) {
+    console.error("[markPlanAsAdapted] ERROR =>", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
