@@ -4335,7 +4335,31 @@ function computePassCount(allAttemptsConceptStats) {
  * => array of { attemptNumber, score, conceptStats }
  *********************************************/
 function buildAllAttemptsConceptStats(quizAttempts, conceptArr) {
-  if (!quizAttempts.length || !conceptArr.length) return [];
+  // (A) If the subchapter truly has no concepts, return empty
+  if (!conceptArr.length) {
+    return [];
+  }
+
+  // (B) If there are no quiz attempts, create one pseudo "attempt"
+  //     marking each concept as NOT_TESTED
+  if (!quizAttempts.length) {
+    const pseudoStats = conceptArr.map((c) => ({
+      conceptName: c.name || `Concept ${c.id || ""}`,
+      passOrFail: "NOT_TESTED",
+      correct: 0,
+      total: 0,
+      ratio: 0,
+    }));
+    return [
+      {
+        attemptNumber: 0, // or 1 if you prefer
+        score: 0,
+        conceptStats: pseudoStats,
+      },
+    ];
+  }
+
+  // (C) Otherwise, use the existing logic
   return quizAttempts.map((attempt) => {
     const stats = buildConceptStats(attempt.quizSubmission || [], conceptArr);
     return {
