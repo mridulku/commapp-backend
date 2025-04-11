@@ -5338,20 +5338,32 @@ app.get("/api/user", async (req, res) => {
 
 // Example: copy the plan doc from "plans" collection into "adaptive_demo" collection
 
+
+
+// Suppose you've already initialized admin.firestore() somewhere above.
+// Then your route:
+
 app.post("/api/markPlanAsAdapted", async (req, res) => {
   console.log("[POST] /api/markPlanAsAdapted => HIT THIS ROUTE");
   console.log("Request body =>", req.body);
 
   try {
-    const { planId, userId, sessionIndexes } = req.body;
+    const { planId, userId, sessionIndex } = req.body;
 
+    // 1) Basic validation
     if (!planId || !userId) {
       return res.status(400).json({ error: "Missing planId or userId" });
     }
+    if (sessionIndex === undefined || sessionIndex === null) {
+      return res.status(400).json({ error: "Missing sessionIndex (exactly one)" });
+    }
+    if (isNaN(sessionIndex)) {
+      return res.status(400).json({ error: "sessionIndex must be a number" });
+    }
 
-    console.log(`[markPlanAsAdapted] userId=${userId}, planId=${planId}, sessionIndexes=${sessionIndexes}`);
+    console.log(`[markPlanAsAdapted] userId=${userId}, planId=${planId}, sessionIndex=${sessionIndex}`);
 
-    // 1) Grab the plan doc from 'adaptive_demo'
+    // 2) Load plan from 'adaptive_demo'
     const dbRef = admin.firestore();
     const planRef = dbRef.collection("adaptive_demo").doc(planId);
 
@@ -5362,98 +5374,195 @@ app.post("/api/markPlanAsAdapted", async (req, res) => {
 
     const planData = snap.data();
     if (!planData.sessions) {
-      // If no sessions => just set adapted: true
-      await planRef.update({ adapted: true });
+      return res.status(400).json({ error: "Plan doc has no 'sessions' array." });
+    }
+
+    // dailyReadingTimeUsed => e.g. 30 minutes
+    const dailyLimit = planData.dailyReadingTimeUsed || 30;
+    console.log(`[markPlanAsAdapted] dailyLimit = ${dailyLimit} minutes`);
+
+    // 3) Check session index in range
+    if (sessionIndex < 0 || sessionIndex >= planData.sessions.length) {
+      return res.status(400).json({
+        error: `sessionIndex out of range (0..${planData.sessions.length - 1})`
+      });
+    }
+
+    // 4) aggregator logic for session #N => find incomplete tasks
+    const sessionObj = planData.sessions[sessionIndex];
+    if (!sessionObj.activities || sessionObj.activities.length === 0) {
+      // If no activities => nothing to do
       return res.json({
         success: true,
-        message: `Plan doc ${planId} has no sessions, but marked adapted.`,
+        message: `Session #${sessionIndex} has no activities; no changes made.`
       });
     }
 
-    // 2) Determine which sessions to process
-    let targetSessionIndexes = [];
-    if (Array.isArray(sessionIndexes) && sessionIndexes.length > 0) {
-      // Use the provided array
-      targetSessionIndexes = sessionIndexes;
-    } else {
-      // If none provided => process all sessions
-      targetSessionIndexes = planData.sessions.map((_, idx) => idx);
-    }
-
-    // 3) Gather unique subchapter IDs from only the target sessions
+    // gather subchapter ids => aggregator calls
     const uniqueSubChIds = new Set();
-    targetSessionIndexes.forEach((sessIdx) => {
-      const sessionObj = planData.sessions[sessIdx];
-      if (!sessionObj || !sessionObj.activities) return;
-
-      sessionObj.activities.forEach((act) => {
-        if (act.subChapterId) {
-          uniqueSubChIds.add(act.subChapterId);
-        }
-      });
+    sessionObj.activities.forEach((act) => {
+      if (act.subChapterId) {
+        uniqueSubChIds.add(act.subChapterId);
+      }
     });
 
-    // 4) For each unique subchapter => call aggregator or subchapter-status
     const subChStatusMap = {};
     for (const subChId of uniqueSubChIds) {
       const url = `http://localhost:3001/subchapter-status?userId=${userId}&planId=${planId}&subchapterId=${subChId}`;
-      console.log(`[markPlanAsAdapted] fetching aggregator => ${url}`);
+      console.log("[markPlanAsAdapted] aggregator =>", url);
       const resp = await axios.get(url);
-      subChStatusMap[subChId] = resp.data;
+      subChStatusMap[subChId] = resp.data; 
+      // e.g. { readingSummary, quizStages, ... }
     }
 
-    // 5) For each target session => set completed = true/false on each activity
-    targetSessionIndexes.forEach((sessIdx) => {
-      const sessionObj = planData.sessions[sessIdx];
-      if (!sessionObj || !sessionObj.activities) return;
+    // 5) Determine which tasks are incomplete
+    //    BUT we do NOT remove them from session #N.
+    //    We'll just make a copy for the next day or new session.
+    const incompleteActs = [];
+    sessionObj.activities.forEach((act) => {
+      let isComplete = false;
+      const subChId = act.subChapterId;
 
-      sessionObj.activities.forEach((act) => {
-        let isComplete = false;
-        const subChId = act.subChapterId;
-        if (!subChId || !subChStatusMap[subChId]) {
-          // aggregator data not found => default false
-          act.completed = false;
-          return;
+      if (!subChId || !subChStatusMap[subChId]) {
+        // aggregator data missing => default incomplete
+        act.completed = false;
+        incompleteActs.push(act);
+        return;
+      }
+
+      const aggregatorResult = subChStatusMap[subChId];
+      const rawType = (act.type || "").toLowerCase();
+
+      if (rawType.includes("read")) {
+        // reading => aggregatorResult.readingSummary.overall === "done"
+        const readingOverall = aggregatorResult.readingSummary?.overall || "not-started";
+        if (readingOverall === "done") {
+          isComplete = true;
         }
-
-        const aggregatorResult = subChStatusMap[subChId];
-        const rawType = (act.type || "").toLowerCase();
-
-        if (rawType.includes("read")) {
-          // reading => aggregatorResult.readingSummary.overall === "done"
-          const readingOverall = aggregatorResult.readingSummary?.overall || "not-started";
-          if (readingOverall === "done") {
-            isComplete = true;
-          }
-        } else if (rawType.includes("quiz")) {
-          // quiz => aggregatorResult.quizStages[quizStage].overall === "done"
-          const stage = (act.quizStage || "").toLowerCase();
-          if (aggregatorResult.quizStages?.[stage]?.overall === "done") {
-            isComplete = true;
-          }
+      } else if (rawType.includes("quiz")) {
+        // quiz => aggregatorResult.quizStages[quizStage].overall === "done"
+        const stage = (act.quizStage || "").toLowerCase();
+        if (aggregatorResult.quizStages?.[stage]?.overall === "done") {
+          isComplete = true;
         }
+      }
 
-        act.completed = isComplete;
-      });
+      act.completed = isComplete;
+      if (!isComplete) {
+        // add to incomplete list
+        incompleteActs.push(act);
+      }
     });
 
-    // 6) Update the plan doc
+    // 6) "Copy" these incomplete tasks into the next day or new day
+    //    Instead of removing them from session #N, we keep them there.
+    //    The next day gets duplicates so the user can re-attempt them.
+    if (incompleteActs.length > 0) {
+      const isLastSession = (sessionIndex === planData.sessions.length - 1);
+
+      // We'll create a "copy" array for the next session
+      // because day #N remains the same
+      const newCopies = incompleteActs.map((orig) => {
+        // Shallow copy. If you want to mutate something (like aggregatorStatus),
+        // you can do so here. Example:
+        return {
+          ...orig,
+          // maybe aggregatorStatus: "carried-forward" or something
+        };
+      });
+
+      if (isLastSession) {
+        // create a brand-new session with these tasks
+        const newSess = {
+          sessionLabel: String(planData.sessions.length + 1),
+          activities: newCopies,
+        };
+        planData.sessions.push(newSess);
+        console.log(
+          `[markPlanAsAdapted] Created new session #${planData.sessions.length - 1} with ${newCopies.length} incomplete tasks (copied).`
+        );
+      } else {
+        // Prepend them to the next session's activities
+        const nextSession = planData.sessions[sessionIndex + 1];
+        if (!nextSession.activities) {
+          nextSession.activities = [];
+        }
+        nextSession.activities = [...newCopies, ...nextSession.activities];
+        console.log(
+          `[markPlanAsAdapted] Copied ${newCopies.length} incomplete tasks to session #${
+            sessionIndex + 1
+          }.`
+        );
+      }
+    }
+
+    // 7) Rebalance from sessionIndex+1 => onward
+    //    so that each day’s sum of timeNeeded <= dailyLimit
+    // If you want to also re-check day #N, do "startRebalanceIndex = sessionIndex;"
+    const startRebalanceIndex = sessionIndex + 1;
+    if (startRebalanceIndex < planData.sessions.length) {
+      // gather all future tasks
+      let allFutureActs = [];
+      for (let i = startRebalanceIndex; i < planData.sessions.length; i++) {
+        allFutureActs.push(...planData.sessions[i].activities);
+      }
+
+      // remove old sessions from that index onward
+      planData.sessions.splice(startRebalanceIndex);
+
+      // Build new sessions day-by-day
+      let newSessions = [];
+      let currentActs = [];
+      let currentTime = 0;
+
+      for (const a of allFutureActs) {
+        const needed = a.timeNeeded || 0;
+        if (currentTime + needed > dailyLimit) {
+          // finalize the current day
+          newSessions.push({
+            sessionLabel: String(planData.sessions.length + newSessions.length + 1),
+            activities: currentActs,
+          });
+          // start new day
+          currentActs = [a];
+          currentTime = needed;
+        } else {
+          currentActs.push(a);
+          currentTime += needed;
+        }
+      }
+      // leftover
+      if (currentActs.length > 0) {
+        newSessions.push({
+          sessionLabel: String(planData.sessions.length + newSessions.length + 1),
+          activities: currentActs,
+        });
+      }
+
+      // add these new sessions at the end
+      planData.sessions.push(...newSessions);
+
+      console.log(
+        `[markPlanAsAdapted] Rebalanced from session #${startRebalanceIndex}, created ${newSessions.length} new sessions to respect dailyLimit=${dailyLimit}.`
+      );
+    }
+
+    // 8) Mark adapted + update Firestore
     await planRef.update({
       sessions: planData.sessions,
       adapted: true,
-      lastAdaptedAt: new Date(), // optional
+      lastAdaptedAt: new Date(),
     });
 
     return res.json({
       success: true,
-      message: `Plan doc ${planId} updated for sessionIndexes=${JSON.stringify(targetSessionIndexes)}.`,
+      message: `Copied incomplete tasks from sessionIndex=${sessionIndex} into the next day. Then rebalanced from day #${startRebalanceIndex} with limit=${dailyLimit}.`,
     });
   } catch (err) {
     console.error("[markPlanAsAdapted] ERROR =>", err);
     return res.status(500).json({ error: err.message });
   }
 });
-
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
