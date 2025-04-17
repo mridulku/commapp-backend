@@ -1,5 +1,6 @@
 const { onObjectFinalized } = require("firebase-functions/v2/storage");
-const { onDocumentCreated, onDocumentUpdated } = require("firebase-functions/v2/firestore");
+const { onDocumentCreated, onDocumentUpdated, onDocumentWritten } = require("firebase-functions/v2/firestore");
+
 const logger = require("firebase-functions/logger");
 const admin = require("firebase-admin");
 const pdfParse = require("pdf-parse");
@@ -1408,6 +1409,7 @@ exports.bulkExtractConceptsForBook = onDocumentUpdated("books_demo/{bookId}", as
  * once for each standard book ID.
  */
 
+/*
 exports.cloneToeflBooksOnUserCreate = onDocumentCreated(
   "users/{userId}",
   async (event) => {
@@ -1533,6 +1535,160 @@ exports.cloneToeflBooksOnUserCreate = onDocumentCreated(
       });
     } catch (err) {
       logger.error("Clone error:", err);
+    }
+  }
+);
+*/
+
+// functions/index.js
+
+// ---------------------------------------------------------------------------
+// cloneToeflBooksOnUserCreate
+// ───────────────────────────
+//  • Fires whenever a user‑doc is *created* OR *updated* (`onDocumentWritten`).
+//  • Waits until the doc contains a recognised `examType`.
+//  • Clones 4 pre‑defined “standard” books for that exam **plus** one
+//    universal onboarding book, then generates an onboarding plan.
+//  • Results are written back to the same user‑doc under a dynamic field
+//    name, e.g.  clonedToeflBooks, clonedCbseBooks, clonedUpscBooks …
+// ---------------------------------------------------------------------------
+exports.cloneToeflBooksOnUserCreate = onDocumentWritten(
+  "users/{userId}",
+  async (event) => {
+    const userId = event.params.userId;
+    const after = event.data.after;
+    if (!after.exists) return;                       // document deleted
+    const userRef   = after.ref;
+    const userData  = after.data() || {};
+    const examType  = (userData.examType || "").toUpperCase();   // e.g. "TOEFL"
+
+    /*────────────────────────────────────────────────────────────────────────*/
+    /*  ALL CONSTANTS LIVE INSIDE THE FUNCTION                               */
+    /*────────────────────────────────────────────────────────────────────────*/
+    const UNIVERSAL_ONBOARDING_BOOK_ID = "Z2mBZLc9oDdcH60ltNPk";   // stays same
+
+    /** Map exam → { standard:[ids], field:"clonedXyzBooks" } */
+    const EXAM_CONFIG = {
+      TOEFL: {
+        standard: [
+          "xaVdzaHkVzpqZEV3IeQ2",
+          "u4Ab23W4N9ZovZRx23x2",
+          "q0VM4VMUs9soKGHPWaHy",
+          "lXbQlaTXvvQLDSiJxCCh",
+        ],
+        field: "clonedToeflBooks",
+      },
+      CBSE: {
+        standard: [
+          "xaVdzaHkVzpqZEV3IeQ2",
+          "u4Ab23W4N9ZovZRx23x2",
+          "q0VM4VMUs9soKGHPWaHy",
+          "lXbQlaTXvvQLDSiJxCCh",
+        ],
+        field: "clonedCbseBooks",
+      },
+      JEEADVANCED: {
+        standard: ["JEEADV_bookID_1", "JEEADV_bookID_2", "JEEADV_bookID_3", "JEEADV_bookID_4"],
+        field: "clonedJeeadvancedBooks",
+      },
+      NEET: {
+        standard: ["NEET_bookID_1", "NEET_bookID_2", "NEET_bookID_3", "NEET_bookID_4"],
+        field: "clonedNeetBooks",
+      },
+      SAT: {
+        standard: ["SAT_bookID_1", "SAT_bookID_2", "SAT_bookID_3", "SAT_bookID_4"],
+        field: "clonedSatBooks",
+      },
+      GATE: {
+        standard: ["GATE_bookID_1", "GATE_bookID_2", "GATE_bookID_3", "GATE_bookID_4"],
+        field: "clonedGateBooks",
+      },
+      CAT: {
+        standard: ["CAT_bookID_1", "CAT_bookID_2", "CAT_bookID_3", "CAT_bookID_4"],
+        field: "clonedCatBooks",
+      },
+      GRE: {
+        standard: ["GRE_bookID_1", "GRE_bookID_2", "GRE_bookID_3", "GRE_bookID_4"],
+        field: "clonedGreBooks",
+      },
+      UPSC: {
+        standard: ["UPSC_bookID_1", "UPSC_bookID_2", "UPSC_bookID_3", "UPSC_bookID_4"],
+        field: "clonedUpscBooks",
+      },
+      FRM: {
+        standard: ["FRM_bookID_1", "FRM_bookID_2", "FRM_bookID_3", "FRM_bookID_4"],
+        field: "clonedFrmBooks",
+      },
+    };
+
+    const cfg = EXAM_CONFIG[examType];
+    if (!cfg) {
+      console.log(`User ${userId} – no recognised examType yet → skip`);
+      return;                                   // wait until examType is set
+    }
+
+    // Already cloned once?  Skip re‑running.
+    if (userData[cfg.field]) {
+      console.log(`User ${userId} already has ${cfg.field} → skip`);
+      return;
+    }
+
+    // ───────────────── helper: clone one standard book ───────────────────
+    const cloneFnURL   = "https://us-central1-comm-app-ff74b.cloudfunctions.net/cloneStandardBook";
+    const planFnURL    = "https://us-central1-comm-app-ff74b.cloudfunctions.net/generateOnboardingPlan";
+
+    async function cloneBook(standardBookId) {
+      const resp = await fetch(cloneFnURL, {
+        method : "POST",
+        headers: { "Content-Type":"application/json" },
+        body   : JSON.stringify({ standardBookId, targetUserId:userId }),
+      });
+      if (!resp.ok) throw new Error(`cloneStandardBook ${resp.status}`);
+      const { newBookId } = await resp.json();
+
+      // grab original name for convenience
+      const doc = await admin.firestore().collection("books_demo").doc(standardBookId).get();
+      const bookName = doc.exists ? doc.data().name : null;
+
+      return { oldBookId: standardBookId, newBookId, bookName };
+    }
+
+    try {
+      /*--------------------------------------------------------------
+        1) Clone the 4 exam‑specific “standard” books
+      --------------------------------------------------------------*/
+      const clonedBooks = [];
+      for (const stdId of cfg.standard) {
+        const cloned = await cloneBook(stdId);
+        clonedBooks.push(cloned);
+      }
+
+      /*--------------------------------------------------------------
+        2) Clone the universal onboarding book + build a plan
+      --------------------------------------------------------------*/
+      const onboardingClone = await cloneBook(UNIVERSAL_ONBOARDING_BOOK_ID);
+
+      const planResp = await fetch(
+        `${planFnURL}?userId=${userId}&bookId=${onboardingClone.newBookId}&targetDate=2025-12-31`,
+        { method:"POST" }
+      );
+      if (!planResp.ok) throw new Error(`generateOnboardingPlan ${planResp.status}`);
+      const { planId } = await planResp.json();
+
+      const onboardingBook = { ...onboardingClone, planId };
+
+      /*--------------------------------------------------------------
+        3) Patch user‑doc with results  (dynamic field name)
+      --------------------------------------------------------------*/
+      await userRef.update({
+        [cfg.field]:     clonedBooks,    // e.g. clonedCbseBooks: [...]
+        onboardingBook,                  // common key
+        updatedAt: Date.now(),
+      });
+
+      console.log(`✅ cloned ${examType} books for ${userId}`);
+    } catch (err) {
+      console.error("cloneToeflBooksOnUserCreate error:", err);
     }
   }
 );
