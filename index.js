@@ -1,5 +1,26 @@
 require("dotenv").config();
 
+// --- PDF-slicer stack -------------
+const multer        = require("multer");
+
+
+const sharp              = require("sharp");
+const { parse: csvParse} = require("csv-parse/sync");
+const fsp                = require("node:fs/promises");
+const fs                 = require("node:fs");
+const path               = require("node:path");
+const { tmpdir }         = require("node:os");
+const { promisify }      = require("node:util");
+const { execFile }       = require("node:child_process");
+const execFileP          = promisify(execFile);
+
+
+
+
+const pdfjsLib        = require('pdfjs-dist/legacy/build/pdf.js');
+
+
+
 
 const { v4: uuidv4 } = require("uuid");
 const express = require("express");
@@ -9,6 +30,10 @@ const admin = require("firebase-admin");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const app = express();
+
+app.use("/slices", express.static(path.join(__dirname, "public", "slices")));
+
+
 console.log("JWT_SECRET in use:", process.env.JWT_SECRET); // Add this line
 const corsOptions = {
   // Replace this with your actual Codespaces origin:
@@ -270,7 +295,6 @@ app.post("/api/hint", async (req, res) => {
 });
 
 
-const multer = require("multer");
 const upload = multer(); 
 const pdfParse = require("pdf-parse");
 app.post("/upload-pdf", upload.single("pdfFile"), async (req, res) => {
@@ -5567,6 +5591,175 @@ app.post("/api/markPlanAsAdapted", async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
+
+
+/**
+ * slicePdf(pdfPath, csvPath, outDir)  →  Promise<[fileName, …]>
+ * csv rows:   pageNumber , cutRatio   (0 – 1)
+ * Example row:  9,0.5313   → cut page 9 at 53.13 % from top.
+ */
+// ──────────────────────────────────────────────────────────────
+// ⬇︎ 1.  DEPENDENCIES for the PDF-slicer stack
+// ──────────────────────────────────────────────────────────────
+
+
+// ──────────────────────────────────────────────────────────────
+// ⬇︎ 2.  Minimal Canvas factory for pdfjs  (no external file)
+//      – copied/adapted from the pdfjs-dist node example
+// ──────────────────────────────────────────────────────────────
+class NodeCanvasFactory {
+  /** Create a canvas of given size and return { canvas, context } */
+  create (width, height) {
+    const canvas  = createCanvas(width, height);
+    const context = canvas.getContext("2d");
+    return { canvas, context };
+  }
+
+  /** Reset an existing canvas to a new size */
+  reset ({ canvas, context }, width, height) {
+    canvas.width  = width;
+    canvas.height = height;
+  }
+
+  /** Dispose of the canvas to free memory */
+  destroy ({ canvas /*, context*/ }) {
+    canvas.width  = 0;
+    canvas.height = 0;
+    canvas        = null;
+  }
+}
+
+// ──────────────────────────────────────────────────────────────
+// ⬇︎ 3.  Core helper – slice a PDF given a CSV of cut-markers
+// ──────────────────────────────────────────────────────────────
+/**
+ * @param {string} pdfPath  – absolute path to the uploaded PDF
+ * @param {string} csvPath  – absolute path to the uploaded CSV
+ * @param {string} outDir   – directory that will receive slice-PNGs
+ * @returns {Promise<string[]>} – list of file-names written inside outDir
+ */
+
+
+// ---------------------------------------------------------------------------
+//  Slice a PDF into PNG strips based on <page,ratio> markers                |
+//  Uses *only* Sharp to render each page → PNG, then crops in-memory.        |
+// ---------------------------------------------------------------------------
+async function slicePdf(pdfPath, csvPath, outDir) {
+  await fsp.mkdir(outDir, { recursive: true });
+
+  // ---------- 1. read CSV  ----------------------------------------
+  const map = {};
+  const rows = csvParse(await fsp.readFile(csvPath));
+  for (const [pStr, rStr] of rows) {
+    const p = Number(pStr), r = Number(rStr);
+    if (!Number.isFinite(p) || !Number.isFinite(r)) continue;
+    (map[p] ||= []).push(r);
+  }
+
+  // ---------- 2. discover #pages  --------------------------------
+  const { stdout: meta } = await execFileP("pdfinfo", [pdfPath]);
+  const pagesLine = meta.toString().split(/\r?\n/).find(l => l.startsWith("Pages:"));
+  const pageCount = Number(pagesLine.split(/\s+/)[1]);
+
+  // ---------- 3. iterate pages that actually have cuts ------------
+  let   global = 1;
+  const written = [];
+
+  for (const pageNum of Object.keys(map).map(Number)) {
+    if (pageNum < 1 || pageNum > pageCount) continue;
+
+    //----------------------------------------------------------------
+    // 3a. rasterise page → tmp PNG   (pdftoppm creates file <prefix>.png)
+    //----------------------------------------------------------------
+    const tmpPrefix = path.join(tmpdir(), `pdftmp_${Date.now()}_${pageNum}`);
+    await execFileP(
+      "pdftoppm",
+      [
+        "-png",
+        "-r", "300",          // 300 dpi
+        "-f", pageNum,
+        "-l", pageNum,
+        "-singlefile",
+        pdfPath,
+        tmpPrefix            // produces `${tmpPrefix}.png`
+      ]
+    );
+    const pagePngPath = `${tmpPrefix}.png`;
+
+    //----------------------------------------------------------------
+    // 3b. crop slices with Sharp
+    //----------------------------------------------------------------
+    const { width, height } = await sharp(pagePngPath).metadata();
+    const ratios = map[pageNum]
+      .map(Number).filter(x => x>0 && x<1)
+      .sort((a,b)=>a-b);
+    ratios.push(1);
+
+    let top = 0;
+    for (const r of ratios) {
+      const bottom = Math.round(r * height);
+      const sliceH = bottom - top;
+      if (sliceH <= 0) { top = bottom; continue; }
+
+      const fname = String(global).padStart(4,"0") + ".png";
+      await sharp(pagePngPath)
+        .extract({ left:0, top, width, height: sliceH })
+        .toFile(path.join(outDir, fname));
+
+      written.push(fname);
+      global += 1;
+      top     = bottom;
+    }
+
+    // clean tmp raster
+    fs.unlinkSync(pagePngPath);
+  }
+
+  console.log(`✅  Wrote ${written.length} slices → ${outDir}`);
+  return written;
+}
+
+// ──────────────────────────────────────────────────────────────
+// ⬇︎ 4.  Express route:  /api/upload-slices
+//     – expects multipart/form-data with fields:
+//         • pdfFile (single PDF)
+//         • csvFile (single CSV of page,ratio)
+// ──────────────────────────────────────────────────────────────
+const multerUpload = multer({ dest: "uploads" });   // tmp directory for raw uploads
+
+app.post("/api/upload-slices",
+  multerUpload.fields([{ name: "pdfFile" }, { name: "csvFile" }]),
+  async (req, res) => {
+    try {
+      const { pdfFile, csvFile } = req.files || {};
+      if (!pdfFile || !csvFile) {
+        return res.status(400).json({ error: "Need both PDF & CSV files." });
+      }
+
+      const uploadId = Date.now().toString(36);
+      const outDir   = path.join(__dirname, "public", "slices", uploadId);
+      await fsp.mkdir(outDir, { recursive: true });
+
+      const fileNames = await slicePdf(pdfFile[0].path, csvFile[0].path, outDir);
+      const urls      = fileNames.map((n) => `/slices/${uploadId}/${n}`);
+
+      // remove temp uploads
+      fsp.unlink(pdfFile[0].path).catch(()=>{});
+      fsp.unlink(csvFile[0].path).catch(()=>{});
+
+      return res.status(200).json({ uploadId, urls });
+    } catch (err) {
+      console.error("Slice error:", err);
+      return res.status(500).json({ error: "Slicing failed." });
+    }
+  }
+);
+
+// ──────────────────────────────────────────────────────────────
+// ⬇︎ 5.  static server for generated images
+//     (already added once near top – keep only ONE instance!)
+// ──────────────────────────────────────────────────────────────
+app.use("/slices", express.static(path.join(__dirname, "public", "slices")));
 
 
 const PORT = process.env.PORT || 3001;
