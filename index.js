@@ -5593,6 +5593,135 @@ app.post("/api/markPlanAsAdapted", async (req, res) => {
 });
 
 
+/* ---------- tiny helper ---------- */
+function utcMidnightMs(iso){
+  const d=new Date(iso);
+  return Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate());
+}
+
+/* ---------- pure rebalance ---------- */
+function runAlgorithm(plan,todayIdx){
+  const limit=plan.dailyReadingTimeUsed||30;
+  const p=JSON.parse(JSON.stringify(plan));
+
+  /* 1. past days */
+  for(let d=0;d<Math.min(todayIdx,p.sessions.length);d++){
+    const s=p.sessions[d];
+    if(s.locked)continue;
+    s.locked=true;
+    const carry=[];
+    s.activities.forEach(a=>{
+      if(a.processed)return;
+      a.processed=true;
+      if(!a.completed){
+        a.deferred=true;
+        const c=JSON.parse(JSON.stringify(a));
+        c.deferred=false;c.completed=false;c.processed=false;
+        c.replicaIndex=(a.replicaIndex??0)+1;
+        carry.push(c);
+      }
+    });
+    if(!carry.length)continue;
+    if(d+1<p.sessions.length){
+      p.sessions[d+1].activities.unshift(...carry);
+    }else{
+      p.sessions.push({sessionLabel:String(p.sessions.length+1),locked:false,activities:carry});
+    }
+  }
+
+  /* 2. rebuild future */
+  const future=[];
+  for(let i=todayIdx;i<p.sessions.length;i++){
+    future.push(...p.sessions[i].activities);
+  }
+  p.sessions.splice(todayIdx);
+
+  let bucket=[],t=0;
+  const push=_=>{
+    p.sessions.push({sessionLabel:String(p.sessions.length+1),locked:false,activities:bucket});
+    bucket=[];t=0;
+  };
+  future.forEach(a=>{
+    const tt=a.timeNeeded||0;
+    if(t+tt>limit&&bucket.length)push();
+    bucket.push(a);t+=tt;
+  });
+  if(bucket.length)push();
+  return p;
+}
+
+/* ---------- API route ---------- */
+app.post('/api/rebalancePlan',async(req,res)=>{
+  try{
+    const {planId,userId,todayISO}=req.body;
+    if(!planId||!userId||!todayISO){
+      return res.status(400).json({error:'planId, userId, todayISO required'});
+    }
+
+    /* 1. plan */
+    const snap=await admin.firestore().collection('adaptive_demo').doc(planId).get();
+    if(!snap.exists)return res.status(404).json({error:'plan not found'});
+    const plan=snap.data();
+
+    /* 2. creation ISO string from createdAt */
+    let creationISO;
+    if(plan.createdAt&&typeof plan.createdAt==='object'){
+      const s=plan.createdAt.seconds??plan.createdAt._seconds;
+      creationISO=new Date(s*1000).toISOString().slice(0,10);
+    }else if(plan.createdAt){
+      creationISO=plan.createdAt.slice(0,10);
+    }else{
+      return res.status(400).json({error:'createdAt missing'});
+    }
+
+    /* 3. day index (TZ-independent) */
+    const todayIdx=Math.max(0,
+      Math.floor((utcMidnightMs(todayISO)-utcMidnightMs(creationISO))/864e5)
+    );
+    const clipped=Math.min(todayIdx,plan.sessions.length-1);
+
+    /* 4. aggregator only for sessions 0…clipped */
+    const subIds=new Set();
+    for(let d=0;d<=clipped;d++){
+      plan.sessions[d].activities.forEach(a=>{
+         if (a.subChapterId && !a.processed) {     // ← skip already-handled work
+             subIds.add(a.subChapterId);
+           }
+      });
+    }
+    const aggMap={};
+    for(const id of subIds){
+      const url=`http://localhost:3001/subchapter-status?userId=${userId}&planId=${planId}&subchapterId=${id}`;
+      try{aggMap[id]=(await axios.get(url)).data;}catch{aggMap[id]=null;}
+    }
+
+    /* 5. mark completed */
+    plan.sessions.forEach(s=>{
+      s.activities.forEach(a=>{
+        const agg=aggMap[a.subChapterId];
+        a.completed=false;
+        if(!agg)return;
+        if(a.type==='READ'){
+          a.completed=agg.readingSummary?.overall==='done';
+        }else if(a.type==='QUIZ'){
+          const st=(a.quizStage||'').toLowerCase();
+          a.completed=agg.quizStages?.[st]?.overall==='done';
+        }
+      });
+    });
+
+    /* 6. run algo & return */
+    const out=runAlgorithm(plan,clipped);
+    return res.json({success:true,plan:out});
+
+  }catch(e){
+    console.error('/api/rebalancePlan',e);
+    res.status(500).json({error:e.message});
+  }
+});
+ 
+
+
 /**
  * slicePdf(pdfPath, csvPath, outDir)  →  Promise<[fileName, …]>
  * csv rows:   pageNumber , cutRatio   (0 – 1)
