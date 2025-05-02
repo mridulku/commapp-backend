@@ -2462,9 +2462,12 @@ app.get('/api/process-book-data', async (req, res) => {
       for (const sDoc of subSnap.docs) {
         const sdata = sDoc.data() || {};
         subArr.push({
+
           id: sDoc.id,
           name: sdata.name || '',
           summary: sdata.summary || '',
+          subject:  sdata.subject  || "",
+ grouping: sdata.grouping || "",
         });
       }
 
@@ -2472,6 +2475,8 @@ app.get('/api/process-book-data', async (req, res) => {
         id: chapterId,
         name: cdata.name || '',
         subchapters: subArr,
+        subject:  cdata.subject  || "",
+ grouping: cdata.grouping || "",
       });
     }
 

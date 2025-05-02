@@ -1252,6 +1252,8 @@ exports.cloneStandardBook = onRequest(async (req, res) => {
         name: chapterData.name || "Untitled Chapter",
         bookId: newBookId,
         userId: targetUserId,
+        subject:  chapterData.subject   ?? "",   // keep original value
+ grouping: chapterData.grouping  ?? "",
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       };
 
@@ -1284,6 +1286,8 @@ exports.cloneStandardBook = onRequest(async (req, res) => {
           wordCount: sData.wordCount || 0,
           chapterId: newChapterId,
           bookId: newBookId,
+          subject:    sData.subject    ?? "",
+ grouping:   sData.grouping   ?? "",
           userId: targetUserId,
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
         };
