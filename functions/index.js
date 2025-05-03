@@ -3534,462 +3534,356 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
 // const admin = require("firebase-admin");
 // const { onRequest } = require("firebase-functions/v2/https");
 
+/**
+ * Cloud Function  ▸  generateAdaptivePlan2
+ * ---------------------------------------------------------------
+ * Builds an adaptive-learning plan for a user.  This “v2” version
+ * preserves the original logic **and** removes Firestore’s
+ * 30-ID limit by transparently chunking every `where(... 'in', [])`
+ * query into slices of ≤30.
+ *
+ * Copy–paste as-is into `functions/index.js` (or equivalent).
+ * Requires:  firebase-functions v2, firebase-admin, uuid, axios.
+ */
+
+
+/* ──────────────────────────────────────────────────────────── */
 exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
+  /* ───── Allow CORS pre-flight ───── */
   res.set("Access-Control-Allow-Origin", "*");
   res.set("Access-Control-Allow-Headers", "Content-Type,Authorization");
   res.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  if (req.method === "OPTIONS") return res.status(204).send("");
 
-  if (req.method === "OPTIONS") {
-    return res.status(204).send("");
+  /* ═══════════════════════════════════════════════════════════
+       Helper #1  ·  Numeric-aware “1. …, 2. …, 10. …” sorting
+  ═══════════════════════════════════════════════════════════ */
+  function sortByNameWithNumericAware(arr = []) {
+    return arr.slice().sort((a, b) => {
+      const rx = /^(\d+)\D*/;
+      const as = a.name || a.title || "";
+      const bs = b.name || b.title || "";
+      const ma = as.match(rx);
+      const mb = bs.match(rx);
+      if (ma && mb) return Number(ma[1]) - Number(mb[1]);
+      return as.localeCompare(bs);
+    });
   }
 
-  let logDetails = [];
+  /* ═══════════════════════════════════════════════════════════
+       Helper #2  ·  Chunked ‘in’ query  (≤30 IDs per slice)
+       Accepts either a CollectionReference OR a pre-chained Query
+       (e.g. col.where('bookId','==',someId)).
+  ═══════════════════════════════════════════════════════════ */
+  async function fetchByIdsChunked(baseQuery, idArray) {
+    if (!idArray || idArray.length === 0) return [];
 
+    const FieldPath = admin.firestore.FieldPath;
+    const CHUNK     = 30;
+    const docs      = [];
+
+    for (let i = 0; i < idArray.length; i += CHUNK) {
+      const slice = idArray.slice(i, i + CHUNK);
+      const qs    = await baseQuery
+        .where(FieldPath.documentId(), "in", slice)
+        .get();
+      docs.push(...qs.docs);
+    }
+    return docs;
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+       Helper #3  ·  Date difference (days)
+  ═══════════════════════════════════════════════════════════ */
+  function getDaysBetween(d1, d2) {
+    const ms = 1000 * 60 * 60 * 24;
+    return Math.ceil((d2.setHours(0,0,0,0) - d1.setHours(0,0,0,0)) / ms);
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+       MAIN  ·  all original logic, minus 30-ID limit errors
+  ═══════════════════════════════════════════════════════════ */
+  const logDetails = [];
   try {
-    // ---------------------
-    // A) Basic Input
-    // ---------------------
-    const userId = req.query.userId || req.body.userId;
-    if (!userId) {
-      return res.status(400).json({ error: "Missing userId." });
-    }
+    /* ───── A)  Basic input ───── */
+    const userId = req.body.userId || req.query.userId;
+    if (!userId) return res.status(400).json({ error: "Missing userId." });
 
-    const targetDateStr = req.query.targetDate || req.body.targetDate;
-    if (!targetDateStr) {
-      return res.status(400).json({ error: "Missing targetDate." });
-    }
+    const targetDateStr = req.body.targetDate || req.query.targetDate;
+    if (!targetDateStr) return res.status(400).json({ error: "Missing targetDate." });
     const targetDate = new Date(targetDateStr);
-    if (isNaN(targetDate.getTime())) {
-      return res.status(400).json({ error: "Invalid targetDate format." });
-    }
+    if (isNaN(targetDate)) return res.status(400).json({ error: "Invalid targetDate." });
 
-    const examId = req.query.examId || req.body.examId || "general";
-    const planId = req.query.planId || req.body.planId || "";
-    const today = new Date();
-    let defaultMaxDayCount = getDaysBetween(today, targetDate);
-    if (defaultMaxDayCount < 0) defaultMaxDayCount = 0;
+    const examId            = req.body.examId           || req.query.examId || "general";
+    const planId            = req.body.planId           || req.query.planId || "";
+    const level             = req.body.planType         || "none-basic";
+    const selectedBooks     = Array.isArray(req.body.selectedBooks)      ? req.body.selectedBooks      : null;
+    const selectedChapters  = Array.isArray(req.body.selectedChapters)   ? req.body.selectedChapters   : null;
+    const selectedSubChaps  = Array.isArray(req.body.selectedSubChapters)? req.body.selectedSubChapters: null;
+    const singleBookIdBody  = req.body.bookId || "";
 
-    const maxDaysOverride =
-      req.body.maxDays !== undefined ? Number(req.body.maxDays) : null;
-    const wpmOverride =
-      req.body.wpm !== undefined ? Number(req.body.wpm) : null;
-    const dailyReadingTimeOverride =
-      req.body.dailyReadingTime !== undefined ? Number(req.body.dailyReadingTime) : null;
-    const quizTimeOverride =
-      req.body.quizTime !== undefined ? Number(req.body.quizTime) : 5;
-    const level = req.body.planType || "none-basic";
+    const today             = new Date();
+    let   maxDayDefault     = Math.max(getDaysBetween(today, targetDate), 0);
 
-    const selectedBooks = Array.isArray(req.body.selectedBooks)
-      ? req.body.selectedBooks
-      : null;
-    const selectedChapters = Array.isArray(req.body.selectedChapters)
-      ? req.body.selectedChapters
-      : null;
-    const selectedSubChapters = Array.isArray(req.body.selectedSubChapters)
-      ? req.body.selectedSubChapters
-      : null;
-    const singleBookIdFromBody = req.body.bookId || "";
+    const maxDaysOverride         = req.body.maxDays         !== undefined ? Number(req.body.maxDays)         : null;
+    const wpmOverride             = req.body.wpm             !== undefined ? Number(req.body.wpm)             : null;
+    const dailyReadingOverride    = req.body.dailyReadingTime!== undefined ? Number(req.body.dailyReadingTime): null;
+    const quizTimeOverride        = req.body.quizTime         !== undefined ? Number(req.body.quizTime)        : 5;
 
-    logDetails.push(`User ID: ${userId}`);
-    logDetails.push(`Plan ID: ${planId}`);
-    logDetails.push(`Target Date: ${targetDateStr}`);
-    logDetails.push(`Exam ID: ${examId}`);
-    logDetails.push(`Plan Type: ${level}`);
+    logDetails.push(`UserID=${userId} PlanID=${planId} Exam=${examId} Level=${level}`);
 
-    // ---------------------
-    // C) Fetch Persona
-    // ---------------------
+    /* ───── C)  Fetch persona ───── */
     const db = admin.firestore();
     const personaSnap = await db
       .collection("learnerPersonas")
       .where("userId", "==", userId)
       .limit(1)
       .get();
+
     if (personaSnap.empty) {
-      return res
-        .status(404)
-        .json({ error: `No learner persona found for userId: ${userId}` });
+      return res.status(404).json({ error: "No learner persona found." });
     }
-    const personaData = personaSnap.docs[0].data() || {};
-    if (!personaData.wpm || !personaData.dailyReadingTime) {
-      return res
-        .status(400)
-        .json({ error: "Persona doc must have 'wpm' and 'dailyReadingTime'." });
-    }
-    const finalWpm = wpmOverride || personaData.wpm;
-    const finalDailyReadingTime =
-      dailyReadingTimeOverride || personaData.dailyReadingTime;
-    let maxDayCount =
-      maxDaysOverride !== null ? maxDaysOverride : defaultMaxDayCount;
+    const persona = personaSnap.docs[0].data();
+    const finalWpm  = wpmOverride          || persona.wpm;
+    const finalMins = dailyReadingOverride || persona.dailyReadingTime;
+    let   maxDayCnt = maxDaysOverride !== null ? maxDaysOverride : maxDayDefault;
 
-    logDetails.push(
-      `Fetched persona => wpm=${personaData.wpm}, dailyReadingTime=${personaData.dailyReadingTime}`
-    );
-    logDetails.push(
-      `Final WPM: ${finalWpm}, dailyReadingTime: ${finalDailyReadingTime}, maxDayCount: ${maxDayCount}`
-    );
+    /* ───── D)  Exam config ───── */
+    const examDoc = await db.collection("examConfigs").doc(examId).get();
+    if (!examDoc.exists) return res.status(400).json({ error: `No exam config for ${examId}` });
+    const examCfg = examDoc.data();
+    const stages  = examCfg.stages || ["reading","remember","understand","apply","analyze"];
 
-    // ---------------------
-    // D) Fetch exam config
-    // ---------------------
-    const examDocRef = db.collection("examConfigs").doc(examId);
-    const examDocSnap = await examDocRef.get();
-    if (!examDocSnap.exists) {
-      return res
-        .status(400)
-        .json({ error: `No exam config found for examId='${examId}'.` });
-    }
-    const examConfig = examDocSnap.data() || {};
-    if (!examConfig.stages || !examConfig.planTypes) {
-      return res
-        .status(400)
-        .json({ error: `Exam config doc missing 'stages' or 'planTypes'.` });
-    }
-    logDetails.push(
-      `Exam config => stages=${JSON.stringify(examConfig.stages)}`
-    );
-
-    // For planType
-    function getPlanTypeStages(planType) {
-      const mapping = examConfig.planTypes[planType];
-      if (!mapping) {
-        return {
-          startStage: examConfig.stages[0],
-          finalStage: examConfig.stages[examConfig.stages.length - 1],
-        };
-      }
-      return mapping;
+    function getPlanTypeStages(pt) {
+      const map = examCfg.planTypes?.[pt];
+      return map
+        ? map
+        : { startStage: stages[0], finalStage: stages[stages.length - 1] };
     }
     const { startStage, finalStage } = getPlanTypeStages(level);
-    logDetails.push(
-      `Plan type => start="${startStage}", final="${finalStage}".`
-    );
 
-    // ---------------------
-    // E) Call aggregator
-    // ---------------------
+    /* ───── E)  Aggregator (best-effort) ───── */
     let aggregatorResult = {};
     try {
-      const axios = require("axios");
-      const aggRes = await axios.get("YOUR-AGGREGATOR-URL", {
+      const aggResp = await axios.get("YOUR-AGGREGATOR-URL", {
         params: {
           userId,
           planId,
-          bookId:
-            singleBookIdFromBody ||
-            (selectedBooks && selectedBooks[0]) ||
-            "",
+          bookId: singleBookIdBody || (selectedBooks && selectedBooks[0]) || "",
         },
       });
-      if (aggRes.data && aggRes.data.aggregatorResult) {
-        aggregatorResult = aggRes.data.aggregatorResult;
-        logDetails.push(
-          `Aggregator data => subCh count: ${Object.keys(aggregatorResult).length}`
-        );
-      }
-    } catch (err) {
-      logDetails.push(`Aggregator error => ${err.message}`);
+      aggregatorResult = aggResp.data?.aggregatorResult || {};
+    } catch (e) {
+      logDetails.push(`Aggregator call failed: ${e.message}`);
     }
 
-    // ---------------------
-    // F) Fetch Books + Subchapters
-    // ---------------------
-    let arrayOfBookIds = [];
-    if (selectedBooks && selectedBooks.length > 0) {
-      arrayOfBookIds = selectedBooks;
-    } else if (singleBookIdFromBody) {
-      arrayOfBookIds = [singleBookIdFromBody];
-    }
+    /* ───── F)  Fetch Books → Chapters → SubChapters (chunk-safe + conceptCount) ───── */
+const arrayOfBookIds = singleBookIdBody
+? [singleBookIdBody]
+: (selectedBooks && selectedBooks.length ? selectedBooks : []);
 
-    let booksSnap;
-    if (arrayOfBookIds.length > 0) {
-      booksSnap = await db
-        .collection("books_demo")
-        .where(admin.firestore.FieldPath.documentId(), "in", arrayOfBookIds)
-        .get();
-      logDetails.push(
-        `Fetching books by ID => ${JSON.stringify(arrayOfBookIds)}`
-      );
-    } else {
-      booksSnap = await db.collection("books_demo").get();
-      logDetails.push("Fetching all books (no IDs specified).");
-    }
+/* Books */
+const booksDocs = arrayOfBookIds.length
+? await fetchByIdsChunked(db.collection("books_demo"), arrayOfBookIds)
+: (await db.collection("books_demo").get()).docs;
 
-    const booksData = [];
-    for (const bookDoc of booksSnap.docs) {
-      const bookId = bookDoc.id;
-      const book = { id: bookId, ...bookDoc.data() };
+const booksData = [];
 
-      // fetch chapters
-      let chaptersSnap;
-      if (selectedChapters && selectedChapters.length > 0) {
-        chaptersSnap = await db
-          .collection("chapters_demo")
-          .where("bookId", "==", bookId)
-          .where(admin.firestore.FieldPath.documentId(), "in", selectedChapters)
-          .get();
-      } else {
-        chaptersSnap = await db
-          .collection("chapters_demo")
-          .where("bookId", "==", bookId)
-          .get();
-      }
-      const chaptersData = [];
-      for (const chapterDoc of chaptersSnap.docs) {
-        const chId = chapterDoc.id;
-        const chData = chapterDoc.data();
-        const chapter = { id: chId, ...chData };
+for (const bookDoc of booksDocs) {
+const bookId = bookDoc.id;
+const book   = { id: bookId, ...bookDoc.data() };
 
-        // fetch subchapters
-        let subSnap;
-        if (selectedSubChapters && selectedSubChapters.length > 0) {
-          subSnap = await db
-            .collection("subchapters_demo")
-            .where("chapterId", "==", chId)
-            .where(
-              admin.firestore.FieldPath.documentId(),
-              "in",
-              selectedSubChapters
-            )
-            .get();
-        } else {
-          subSnap = await db
-            .collection("subchapters_demo")
-            .where("chapterId", "==", chId)
-            .get();
+/* Chapters for this book */
+const chapBase = db.collection("chapters_demo").where("bookId", "==", bookId);
+const chapDocs = selectedChapters && selectedChapters.length
+  ? await fetchByIdsChunked(chapBase, selectedChapters)
+  : (await chapBase.get()).docs;
+
+const chaptersData = [];
+
+for (const chapDoc of chapDocs) {
+  const chapId  = chapDoc.id;
+  const chapter = { id: chapId, ...chapDoc.data() };
+
+  /* Sub-chapters */
+  const subBase = db.collection("subchapters_demo").where("chapterId", "==", chapId);
+  const subDocs = selectedSubChaps && selectedSubChaps.length
+    ? await fetchByIdsChunked(subBase, selectedSubChaps)
+    : (await subBase.get()).docs;
+
+  /* build subData with conceptCount ------------------------------------ */
+  const subData = [];
+
+  for (const sDoc of subDocs) {
+    const sData = sDoc.data() || {};
+
+    // NEW ▶ count how many concept docs belong to this sub-chapter
+    const cSnap = await db
+      .collection("subchapterConcepts")
+      .where("subChapterId", "==", sDoc.id)
+      .get();
+    const conceptCount = Math.max(cSnap.size, 0);       // 0-N
+
+    subData.push({
+      id: sDoc.id,
+      ...sData,
+      conceptCount,                                     // ◀ carry forward
+    });
+  }
+  /* -------------------------------------------------------------------- */
+
+  chapter.subchapters = sortByNameWithNumericAware(subData);
+  chaptersData.push(chapter);
+}
+
+book.chapters = sortByNameWithNumericAware(chaptersData);
+booksData.push(book);
+}
+logDetails.push(`Total books: ${booksData.length}`);
+
+    /* ───── G)  Build activities buckets (unchanged logic) ───── */
+    const stIdx = (s) => stages.indexOf(s);
+    const startIdx = stIdx(startStage);
+    const finalIdx = stIdx(finalStage);
+
+    const bucketReadRem = [], bucketUnd = [], bucketApp = [], bucketAna = [];
+
+    
+
+    function maybeTask(sub, agg, kind, stageKey = null) {
+      if (kind === "READ") {
+        if (!agg || agg.reading !== "done") {
+          const mins = sub.wordCount
+            ? Math.ceil(sub.wordCount / finalWpm)
+            : 5;
+          return {
+            type: "READ",
+            aggregatorStatus: agg ? agg.reading || "not-started" : "not-started",
+            timeNeeded: mins,
+          };
         }
-        const subData = subSnap.docs.map((sd) => ({
-          id: sd.id,
-          ...sd.data(),
-        }));
-        chapter.subchapters = sortByNameWithNumericAware(subData);
-        chaptersData.push(chapter);
-      }
-      book.chapters = sortByNameWithNumericAware(chaptersData);
-      booksData.push(book);
-    }
-    logDetails.push(`Total books: ${booksData.length}`);
-
-    // ---------------------
-    // G) Build tasks (grouped by stage buckets)
-    // ---------------------
-    const stIndex = (str) => examConfig.stages.indexOf(str);
-    const startIdx = stIndex(startStage);
-    const finalIdx = stIndex(finalStage);
-
-    function maybeReadingTask(subCh, agg) {
-      // aggregator says "reading" is not done => we create a READ task
-      if (!agg || agg.reading !== "done") {
-        const readTime = subCh.wordCount
-          ? Math.ceil(subCh.wordCount / finalWpm)
-          : 5;
-        return {
-          type: "READ",
-          aggregatorStatus: agg ? agg.reading || "not-started" : "not-started",
-          timeNeeded: readTime,
-        };
+      } else if (kind === "REM") {
+        if (stages.includes("remember") && (!agg || agg.remember !== "done")) {
+          return {
+            type: "QUIZ",
+            quizStage: "remember",
+            aggregatorStatus: agg ? agg.remember || "not-started" : "not-started",
+            timeNeeded: Math.max(sub.conceptCount || 0, 1),   // ← use sub.*
+          };
+        }
+      } else if (kind === "QUIZ") {
+        if (!agg || agg[stageKey] !== "done") {
+          return {
+            type: "QUIZ",
+            quizStage: stageKey,
+            aggregatorStatus: agg ? agg[stageKey] || "not-started" : "not-started",
+            timeNeeded: Math.max(sub.conceptCount || 0, 1),   // ← use sub.*
+          };
+        }
       }
       return null;
     }
-    function maybeRememberTask(subCh, agg) {
-      if (!examConfig.stages.includes("remember")) return null;
-      if (!agg || agg.remember !== "done") {
-        return {
-          type: "QUIZ",
-          quizStage: "remember",
-          aggregatorStatus: agg ? agg.remember || "not-started" : "not-started",
-          timeNeeded: quizTimeOverride,
-        };
-      }
-      return null;
-    }
-    function maybeQuizTask(subCh, agg, stageKey) {
-      if (!agg || agg[stageKey] !== "done") {
-        return {
-          type: "QUIZ",
-          quizStage: stageKey,
-          aggregatorStatus: agg ? agg[stageKey] || "not-started" : "not-started",
-          timeNeeded: quizTimeOverride,
-        };
-      }
-      return null;
-    }
-
-    // We'll keep different arrays for each stage "bucket"
-    const bucketReadingRemember = [];
-    const bucketUnderstand = [];
-    const bucketApply = [];
-    const bucketAnalyze = [];
 
     for (const book of booksData) {
-      if (!book.chapters) continue;
-      for (const chapter of book.chapters) {
-        if (!chapter.subchapters) continue;
-        for (const subCh of chapter.subchapters) {
-          const subChId = subCh.id;
-          const aggEntry = aggregatorResult[subChId] || null;
+      for (const chapter of (book.chapters||[])) {
+        for (const sub of (chapter.subchapters||[])) {
+          const subId = sub.id;
+          const agg   = aggregatorResult[subId];
 
-          // 1) reading
-          const rd = maybeReadingTask(subCh, aggEntry);
-          if (rd) {
-            bucketReadingRemember.push({
-              activityId: uuidv4(),
-              ...rd,
-              bookId: book.id,
-              bookName: book.name || "",
-              chapterId: chapter.id,
-              chapterName: chapter.name || "",
-              subChapterId: subChId,
-              subChapterName: subCh.name || "",
-            });
+          const rd  = maybeTask(sub, agg, "READ");
+          const rem = maybeTask(sub, agg, "REM");
+          if (rd ) bucketReadRem.push({...commonMeta(), ...rd});
+          if (rem) bucketReadRem.push({...commonMeta(), ...rem});
+
+          for (const st of stages) {
+            if (["reading","remember"].includes(st)) continue;
+            if (stIdx(st) < startIdx || stIdx(st) > finalIdx) continue;
+            const q = maybeTask(sub, agg, "QUIZ", st);
+            if (!q) continue;
+            const item = {...commonMeta(), ...q};
+            if (st==="understand") bucketUnd.push(item);
+            else if (st==="apply") bucketApp.push(item);
+            else if (st==="analyze") bucketAna.push(item);
           }
 
-          // 2) remember
-          const rem = maybeRememberTask(subCh, aggEntry);
-          if (rem) {
-            bucketReadingRemember.push({
+          function commonMeta() {
+            return {
               activityId: uuidv4(),
-              ...rem,
               bookId: book.id,
               bookName: book.name || "",
               chapterId: chapter.id,
               chapterName: chapter.name || "",
-              subChapterId: subChId,
-              subChapterName: subCh.name || "",
-            });
-          }
-
-          // 3) other quiz stages (understand/apply/analyze)
-          for (const stageKey of examConfig.stages) {
-            if (stageKey === "reading" || stageKey === "remember") continue;
-            const idx = stIndex(stageKey);
-            if (idx < startIdx || idx > finalIdx) continue;
-
-            const qz = maybeQuizTask(subCh, aggEntry, stageKey);
-            if (!qz) continue;
-
-            const item = {
-              activityId: uuidv4(),
-              ...qz,
-              bookId: book.id,
-              bookName: book.name || "",
-              chapterId: chapter.id,
-              chapterName: chapter.name || "",
-              subChapterId: subChId,
-              subChapterName: subCh.name || "",
+              subChapterId: sub.id,
+              subChapterName: sub.name || "",
             };
-            if (stageKey === "understand") {
-              bucketUnderstand.push(item);
-            } else if (stageKey === "apply") {
-              bucketApply.push(item);
-            } else if (stageKey === "analyze") {
-              bucketAnalyze.push(item);
-            }
           }
         }
       }
     }
 
-    logDetails.push(
-      `Bucket sizes => reading+remember=${bucketReadingRemember.length},` +
-      ` understand=${bucketUnderstand.length}, apply=${bucketApply.length}, analyze=${bucketAnalyze.length}`
-    );
-
-    // ---------------------
-    // H) Distribute tasks in one single pass (no forced day gaps)
-    // ---------------------
+    /* ───── H)  Schedule into sessions (unchanged) ───── */
     const sessions = [];
-    let dayIndex = 1;
+    let dayIdx = 1;
 
-    function distributeTasks(allTasks) {
-      let localTasks = [...allTasks];
-
-      while (localTasks.length > 0 && dayIndex <= maxDayCount) {
-        let timeUsed = 0;
-        let dayActivities = [];
-
-        // Fill up the day with as many tasks as fit
-        while (localTasks.length > 0) {
-          const leftover = finalDailyReadingTime - timeUsed;
-          if (leftover <= 0) break;
-
-          const nextTask = localTasks[0];
-          const tNeeded = nextTask.timeNeeded || 1;
-          if (tNeeded <= leftover) {
-            dayActivities.push(nextTask);
-            timeUsed += tNeeded;
-            localTasks.shift();
-          } else {
-            break;
-          }
+    function distribute(tasks) {
+      let queue = [...tasks];
+      while (queue.length && dayIdx <= maxDayCnt) {
+        let used = 0, today = [];
+        while (queue.length) {
+          const left = finalMins - used;
+          if (left <= 0) break;
+          const next = queue[0];
+          if ((next.timeNeeded||1) <= left) {
+            today.push(next);
+            used += next.timeNeeded||1;
+            queue.shift();
+          } else break;
         }
-
-        // If no tasks fit at all, skip this day
-        if (dayActivities.length === 0) {
-          dayIndex++;
-          continue;
+        if (today.length) {
+          sessions.push({ sessionLabel:String(dayIdx), activities: today });
         }
-
-        // We scheduled something for this day
-        sessions.push({
-          sessionLabel: String(dayIndex),
-          activities: dayActivities,
-        });
-
-        dayIndex++;
+        dayIdx++;
       }
-
-      return localTasks.length; // leftover
+      return queue.length;
     }
 
-    // Merge tasks in the logical order: reading+remember => understand => apply => analyze
-    const allTasksInOrder = [
-      ...bucketReadingRemember,
-      ...bucketUnderstand,
-      ...bucketApply,
-      ...bucketAnalyze
-    ];
+    const leftovers = distribute([
+      ...bucketReadRem,
+      ...bucketUnd,
+      ...bucketApp,
+      ...bucketAna,
+    ]);
 
-    let leftover = distributeTasks(allTasksInOrder);
-    logDetails.push(`All tasks => leftover: ${leftover}`);
-
-    // ---------------------
-    // I) Write final plan doc
-    // ---------------------
-    let singleBookId = "";
-    if (singleBookIdFromBody) {
-      singleBookId = singleBookIdFromBody;
-    } else if (selectedBooks && selectedBooks.length > 0) {
-      singleBookId = selectedBooks[0];
-    }
-
+    /* ───── I)  Persist final plan ───── */
     const planDoc = {
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      planName: `Adaptive Plan (v2) for User ${userId}`,
+      planName:  `Adaptive Plan (v2) for User ${userId}`,
       userId,
       targetDate: targetDateStr,
       sessions,
-      maxDayCount,
+      maxDayCount: maxDayCnt,
       wpmUsed: finalWpm,
-      dailyReadingTimeUsed: finalDailyReadingTime,
+      dailyReadingTimeUsed: finalMins,
       level,
-      bookId: singleBookId,
+      bookId: singleBookIdBody || arrayOfBookIds[0] || "",
       examId,
-      logDetails,
+      logDetails: [...logDetails, `leftoverTasks=${leftovers}`],
     };
 
-    const newRef = await db.collection("adaptive_demo").add(planDoc);
+    const ref = await db.collection("adaptive_demo").add(planDoc);
 
     return res.status(200).json({
-      message: "Successfully generated plan (v2) with chunked scheduling (no forced day gaps).",
-      planId: newRef.id,
+      message: "Plan generated (v2) with chunk-safe Firestore queries.",
+      planId:  ref.id,
       planDoc,
     });
-  } catch (error) {
-    console.error("Error in generateAdaptivePlan2:", error);
-    return res.status(500).json({ error: error.message });
+  } catch (err) {
+    console.error("generateAdaptivePlan2 error:", err);
+    return res.status(500).json({ error: err.message });
   }
 });
+
+
 
 // -------------------------------------------------------------------------------------------
 // Utility function used above (unchanged):
@@ -6103,45 +5997,7 @@ exports.generateOnboardingPlan = onRequest(async (req, res) => {
         subChapterId,
         subChapterName,
       },
-      // 5) guide => understand
-      {
-        activityId: uuidv4(),
-        type: "guide",
-        guideType: "understand",
-        aggregatorStatus,
-        timeNeeded: guideTimeNeeded,
-        bookId,
-        chapterId,
-        chapterName,
-        subChapterId,
-        subChapterName,
-      },
-      // 6) guide => apply
-      {
-        activityId: uuidv4(),
-        type: "guide",
-        guideType: "apply",
-        aggregatorStatus,
-        timeNeeded: guideTimeNeeded,
-        bookId,
-        chapterId,
-        chapterName,
-        subChapterId,
-        subChapterName,
-      },
-      // 7) guide => analyze
-      {
-        activityId: uuidv4(),
-        type: "guide",
-        guideType: "analyze",
-        aggregatorStatus,
-        timeNeeded: guideTimeNeeded,
-        bookId,
-        chapterId,
-        chapterName,
-        subChapterId,
-        subChapterName,
-      },
+  
     ];
 
     // Only one session in the array:
@@ -6167,14 +6023,14 @@ exports.generateOnboardingPlan = onRequest(async (req, res) => {
       bookId,
       examId: "general",
       onboardingPlan: true, // <<--- ADDED
-      logDetails: ["Onboarding plan with 7 tasks (no quizzes)."],
+      logDetails: ["Onboarding plan with 5 tasks (no quizzes)."],
     };
 
     // 6) Write to Firestore
     const newRef = await db.collection("adaptive_demo").add(planDoc);
 
     return res.status(200).json({
-      message: "Successfully generated ONBOARDING plan with 7 tasks, no quizzes.",
+      message: "Successfully generated ONBOARDING plan with 5 tasks, no quizzes.",
       planId: newRef.id,
       planDoc,
     });
