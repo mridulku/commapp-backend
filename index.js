@@ -14,6 +14,7 @@ const { promisify }      = require("node:util");
 const { execFile }       = require("node:child_process");
 const execFileP          = promisify(execFile);
 
+const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:3001";
 
 
 
@@ -5436,7 +5437,7 @@ app.post("/api/markPlanAsAdapted", async (req, res) => {
 
     const subChStatusMap = {};
     for (const subChId of uniqueSubChIds) {
-      const url = `http://localhost:3001/subchapter-status?userId=${userId}&planId=${planId}&subchapterId=${subChId}`;
+      const url = `${BACKEND_URL}/subchapter-status?userId=${userId}&planId=${planId}&subchapterId=${subChId}`;
       console.log("[markPlanAsAdapted] aggregator =>", url);
       const resp = await axios.get(url);
       subChStatusMap[subChId] = resp.data; 
@@ -5696,7 +5697,7 @@ app.post('/api/rebalancePlan',async(req,res)=>{
     }
     const aggMap={};
     for(const id of subIds){
-      const url=`http://localhost:3001/subchapter-status?userId=${userId}&planId=${planId}&subchapterId=${id}`;
+      const url = `${BACKEND_URL}/subchapter-status?userId=${userId}&planId=${planId}&subchapterId=${id}`;
       try{aggMap[id]=(await axios.get(url)).data;}catch{aggMap[id]=null;}
     }
 
