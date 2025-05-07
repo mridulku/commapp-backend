@@ -3548,15 +3548,19 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
 
 
 /* ──────────────────────────────────────────────────────────── */
+
+// functions/generateAdaptivePlan2.ts (Firebase Functions v2)
+
+
 exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
   /* ───── Allow CORS pre-flight ───── */
-  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Origin",  "*");
   res.set("Access-Control-Allow-Headers", "Content-Type,Authorization");
   res.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   if (req.method === "OPTIONS") return res.status(204).send("");
 
   /* ═══════════════════════════════════════════════════════════
-       Helper #1  ·  Numeric-aware “1. …, 2. …, 10. …” sorting
+       Helper #1 · Numeric-aware “1. …, 2. …, 10. …” sorting
   ═══════════════════════════════════════════════════════════ */
   function sortByNameWithNumericAware(arr = []) {
     return arr.slice().sort((a, b) => {
@@ -3571,9 +3575,7 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
   }
 
   /* ═══════════════════════════════════════════════════════════
-       Helper #2  ·  Chunked ‘in’ query  (≤30 IDs per slice)
-       Accepts either a CollectionReference OR a pre-chained Query
-       (e.g. col.where('bookId','==',someId)).
+       Helper #2 · Chunked ‘in’ query  (≤30 IDs per slice)
   ═══════════════════════════════════════════════════════════ */
   async function fetchByIdsChunked(baseQuery, idArray) {
     if (!idArray || idArray.length === 0) return [];
@@ -3593,7 +3595,7 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
   }
 
   /* ═══════════════════════════════════════════════════════════
-       Helper #3  ·  Date difference (days)
+       Helper #3 · Date-difference (days)
   ═══════════════════════════════════════════════════════════ */
   function getDaysBetween(d1, d2) {
     const ms = 1000 * 60 * 60 * 24;
@@ -3601,11 +3603,11 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
   }
 
   /* ═══════════════════════════════════════════════════════════
-       MAIN  ·  all original logic, minus 30-ID limit errors
+       MAIN
   ═══════════════════════════════════════════════════════════ */
   const logDetails = [];
   try {
-    /* ───── A)  Basic input ───── */
+    /* ───── A) Basic input ───── */
     const userId = req.body.userId || req.query.userId;
     if (!userId) return res.status(400).json({ error: "Missing userId." });
 
@@ -3625,14 +3627,13 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     const today             = new Date();
     let   maxDayDefault     = Math.max(getDaysBetween(today, targetDate), 0);
 
-    const maxDaysOverride         = req.body.maxDays         !== undefined ? Number(req.body.maxDays)         : null;
-    const wpmOverride             = req.body.wpm             !== undefined ? Number(req.body.wpm)             : null;
-    const dailyReadingOverride    = req.body.dailyReadingTime!== undefined ? Number(req.body.dailyReadingTime): null;
-    const quizTimeOverride        = req.body.quizTime         !== undefined ? Number(req.body.quizTime)        : 5;
+    const maxDaysOverride      = req.body.maxDays         !== undefined ? Number(req.body.maxDays)         : null;
+    const wpmOverride          = req.body.wpm             !== undefined ? Number(req.body.wpm)             : null;
+    const dailyReadingOverride = req.body.dailyReadingTime!== undefined ? Number(req.body.dailyReadingTime): null;
 
     logDetails.push(`UserID=${userId} PlanID=${planId} Exam=${examId} Level=${level}`);
 
-    /* ───── C)  Fetch persona ───── */
+    /* ───── C) Fetch persona ───── */
     const db = admin.firestore();
     const personaSnap = await db
       .collection("learnerPersonas")
@@ -3643,12 +3644,12 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     if (personaSnap.empty) {
       return res.status(404).json({ error: "No learner persona found." });
     }
-    const persona = personaSnap.docs[0].data();
+    const persona   = personaSnap.docs[0].data();
     const finalWpm  = wpmOverride          || persona.wpm;
     const finalMins = dailyReadingOverride || persona.dailyReadingTime;
     let   maxDayCnt = maxDaysOverride !== null ? maxDaysOverride : maxDayDefault;
 
-    /* ───── D)  Exam config ───── */
+    /* ───── D) Exam config ───── */
     const examDoc = await db.collection("examConfigs").doc(examId).get();
     if (!examDoc.exists) return res.status(400).json({ error: `No exam config for ${examId}` });
     const examCfg = examDoc.data();
@@ -3662,7 +3663,7 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     }
     const { startStage, finalStage } = getPlanTypeStages(level);
 
-    /* ───── E)  Aggregator (best-effort) ───── */
+    /* ───── E) Aggregator (best-effort) ───── */
     let aggregatorResult = {};
     try {
       const aggResp = await axios.get("YOUR-AGGREGATOR-URL", {
@@ -3677,85 +3678,84 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
       logDetails.push(`Aggregator call failed: ${e.message}`);
     }
 
-    /* ───── F)  Fetch Books → Chapters → SubChapters (chunk-safe + conceptCount) ───── */
-const arrayOfBookIds = singleBookIdBody
-? [singleBookIdBody]
-: (selectedBooks && selectedBooks.length ? selectedBooks : []);
+    /* ───── F) Fetch Books → Chapters → SubChapters ───── */
+    const arrayOfBookIds = singleBookIdBody
+      ? [singleBookIdBody]
+      : (selectedBooks && selectedBooks.length ? selectedBooks : []);
 
-/* Books */
-const booksDocs = arrayOfBookIds.length
-? await fetchByIdsChunked(db.collection("books_demo"), arrayOfBookIds)
-: (await db.collection("books_demo").get()).docs;
+    const booksDocs = arrayOfBookIds.length
+      ? await fetchByIdsChunked(db.collection("books_demo"), arrayOfBookIds)
+      : (await db.collection("books_demo").get()).docs;
 
-const booksData = [];
+    const booksData   = [];
+    const subjectMap  = {};                // ← NEW for unique subject → grouping sets
 
-for (const bookDoc of booksDocs) {
-const bookId = bookDoc.id;
-const book   = { id: bookId, ...bookDoc.data() };
+    for (const bookDoc of booksDocs) {
+      const bookId = bookDoc.id;
+      const book   = { id: bookId, ...bookDoc.data() };
 
-/* Chapters for this book */
-const chapBase = db.collection("chapters_demo").where("bookId", "==", bookId);
-const chapDocs = selectedChapters && selectedChapters.length
-  ? await fetchByIdsChunked(chapBase, selectedChapters)
-  : (await chapBase.get()).docs;
+      /* Chapters for this book */
+      const chapBase = db.collection("chapters_demo").where("bookId", "==", bookId);
+      const chapDocs = selectedChapters && selectedChapters.length
+        ? await fetchByIdsChunked(chapBase, selectedChapters)
+        : (await chapBase.get()).docs;
 
-const chaptersData = [];
+      const chaptersData = [];
 
-for (const chapDoc of chapDocs) {
-  const chapId  = chapDoc.id;
-  const chapter = { id: chapId, ...chapDoc.data() };
+      for (const chapDoc of chapDocs) {
+        const chapId  = chapDoc.id;
+        const chapter = { id: chapId, ...chapDoc.data() };
 
-  /* Sub-chapters */
-  const subBase = db.collection("subchapters_demo").where("chapterId", "==", chapId);
-  const subDocs = selectedSubChaps && selectedSubChaps.length
-    ? await fetchByIdsChunked(subBase, selectedSubChaps)
-    : (await subBase.get()).docs;
+        /* ------------- capture subject/grouping ------------- */
+        const subj = chapter.subject  || "Unknown";
+        const grp  = chapter.grouping || "Other";
+        (subjectMap[subj] = subjectMap[subj] || new Set()).add(grp);
+        /* ---------------------------------------------------- */
 
-  /* build subData with conceptCount ------------------------------------ */
-  const subData = [];
+        /* Sub-chapters */
+        const subBase = db.collection("subchapters_demo").where("chapterId", "==", chapId);
+        const subDocs = selectedSubChaps && selectedSubChaps.length
+          ? await fetchByIdsChunked(subBase, selectedSubChaps)
+          : (await subBase.get()).docs;
 
-  for (const sDoc of subDocs) {
-    const sData = sDoc.data() || {};
+        const subData = [];
 
-    // NEW ▶ count how many concept docs belong to this sub-chapter
-    const cSnap = await db
-      .collection("subchapterConcepts")
-      .where("subChapterId", "==", sDoc.id)
-      .get();
-    const conceptCount = Math.max(cSnap.size, 0);       // 0-N
+        for (const sDoc of subDocs) {
+          const sData = sDoc.data() || {};
 
-    subData.push({
-      id: sDoc.id,
-      ...sData,
-      conceptCount,                                     // ◀ carry forward
-    });
-  }
-  /* -------------------------------------------------------------------- */
+          /* concept count */
+          const cSnap = await db
+            .collection("subchapterConcepts")
+            .where("subChapterId", "==", sDoc.id)
+            .get();
+          const conceptCount = Math.max(cSnap.size, 0);
 
-  chapter.subchapters = sortByNameWithNumericAware(subData);
-  chaptersData.push(chapter);
-}
+          subData.push({
+            id: sDoc.id,
+            ...sData,
+            conceptCount,
+          });
+        }
+        chapter.subchapters = sortByNameWithNumericAware(subData);
+        chaptersData.push(chapter);
+      }
 
-book.chapters = sortByNameWithNumericAware(chaptersData);
-booksData.push(book);
-}
-logDetails.push(`Total books: ${booksData.length}`);
+      book.chapters = sortByNameWithNumericAware(chaptersData);
+      booksData.push(book);
+    }
+    logDetails.push(`Total books: ${booksData.length}`);
 
-    /* ───── G)  Build activities buckets (unchanged logic) ───── */
-    const stIdx = (s) => stages.indexOf(s);
-    const startIdx = stIdx(startStage);
-    const finalIdx = stIdx(finalStage);
+    /* ───── G) Build activity buckets (unchanged) ───── */
+    const stIdx      = (s) => stages.indexOf(s);
+    const startIdx   = stIdx(startStage);
+    const finalIdx   = stIdx(finalStage);
 
     const bucketReadRem = [], bucketUnd = [], bucketApp = [], bucketAna = [];
-
-    
 
     function maybeTask(sub, agg, kind, stageKey = null) {
       if (kind === "READ") {
         if (!agg || agg.reading !== "done") {
-          const mins = sub.wordCount
-            ? Math.ceil(sub.wordCount / finalWpm)
-            : 5;
+          const mins = sub.wordCount ? Math.ceil(sub.wordCount / finalWpm) : 5;
           return {
             type: "READ",
             aggregatorStatus: agg ? agg.reading || "not-started" : "not-started",
@@ -3768,7 +3768,7 @@ logDetails.push(`Total books: ${booksData.length}`);
             type: "QUIZ",
             quizStage: "remember",
             aggregatorStatus: agg ? agg.remember || "not-started" : "not-started",
-            timeNeeded: Math.max(sub.conceptCount || 0, 1),   // ← use sub.*
+            timeNeeded: Math.max(sub.conceptCount || 0, 1),
           };
         }
       } else if (kind === "QUIZ") {
@@ -3777,7 +3777,7 @@ logDetails.push(`Total books: ${booksData.length}`);
             type: "QUIZ",
             quizStage: stageKey,
             aggregatorStatus: agg ? agg[stageKey] || "not-started" : "not-started",
-            timeNeeded: Math.max(sub.conceptCount || 0, 1),   // ← use sub.*
+            timeNeeded: Math.max(sub.conceptCount || 0, 1),
           };
         }
       }
@@ -3821,7 +3821,7 @@ logDetails.push(`Total books: ${booksData.length}`);
       }
     }
 
-    /* ───── H)  Schedule into sessions (unchanged) ───── */
+    /* ───── H) Schedule into sessions (unchanged) ───── */
     const sessions = [];
     let dayIdx = 1;
 
@@ -3854,8 +3854,14 @@ logDetails.push(`Total books: ${booksData.length}`);
       ...bucketAna,
     ]);
 
-    /* ───── I)  Persist final plan ───── */
-    const planDoc = {
+    /* ───── I) Build subject overview (NEW) ───── */
+    const subjects = Object.entries(subjectMap).map(([subj, set]) => ({
+      subject:   subj,
+      groupings: Array.from(set),
+    }));
+
+    /* ───── J) Persist final plan ───── */
+    const planDocBase = {
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       planName:  `Adaptive Plan (v2) for User ${userId}`,
       userId,
@@ -3867,23 +3873,44 @@ logDetails.push(`Total books: ${booksData.length}`);
       level,
       bookId: singleBookIdBody || arrayOfBookIds[0] || "",
       examId,
+      subjects,                                   // ← NEW FIELD
       logDetails: [...logDetails, `leftoverTasks=${leftovers}`],
     };
 
-    const ref = await db.collection("adaptive_demo").add(planDoc);
+    const { ref: newPlanRef, fullDoc } = await db.runTransaction(async (tx) => {
+            // 1️⃣ how many existing plans for this user?
+            const snap = await tx.get(
+              db.collection("adaptive_demo").where("userId", "==", userId)
+            );
+            const nextIndex = snap.size + 1;              // 1-based
+      
+            // 2️⃣ build name & full payload
+            const planName  = `Study Plan ${nextIndex}`;    // e.g. studyplan4
+            const fullDoc   = {
+              ...planDocBase,
+              planIndex: nextIndex,                       // keep the raw integer
+              planName,                                   // store the display string
+            };
+      
+            // 3️⃣ create the plan inside the same txn
+            const ref = db.collection("adaptive_demo").doc();
+            tx.set(ref, fullDoc);
+            return { ref, fullDoc };  // ✅ send both out of the txn
+          });
 
-    return res.status(200).json({
-      message: "Plan generated (v2) with chunk-safe Firestore queries.",
-      planId:  ref.id,
-      planDoc,
+
+          return res.status(200).json({
+              message : "Plan generated (v2) with sequential study-plan name.",
+              planId  : newPlanRef.id,
+              planDoc : fullDoc,
+            
     });
+
   } catch (err) {
     console.error("generateAdaptivePlan2 error:", err);
     return res.status(500).json({ error: err.message });
   }
 });
-
-
 
 // -------------------------------------------------------------------------------------------
 // Utility function used above (unchanged):
