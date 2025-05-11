@@ -3552,6 +3552,262 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
 // functions/generateAdaptivePlan2.ts (Firebase Functions v2)
 
 
+/** returns an array of { conceptName } for the given sub-chapter id */
+async function fetchConceptNames(subChapterId) {
+  const snap = await db
+    .collection("subchapterConcepts")
+    .where("subChapterId", "==", subChapterId)
+    .get();
+  return snap.docs.map(d => d.get("conceptName") || d.id);
+}
+
+// ────────────────────────────────────────────────────────────────────
+//  main seeding helper
+// ────────────────────────────────────────────────────────────────────
+/***********************************************************************
+ * createEmptyPlanSummary  – v3
+ * --------------------------------------------------------------------
+ *  • Seeds adaptivePlanSummaries/{planId}
+ *  • Each /subs/{subId} shell now has conceptStats for *all* 4 stages
+ **********************************************************************/
+async function createEmptyPlanSummary(opts) {
+  const { uid, planId, planDoc, tx = null } = opts;           // uid kept for rules
+  const rootRef = db.doc(`adaptivePlanSummaries/${planId}`);
+
+  /* 1️⃣ exit if already exists */
+  const rootSnap = tx ? await tx.get(rootRef) : await rootRef.get();
+  if (rootSnap.exists) return;
+
+  /* 2️⃣ root stub */
+  const rootPayload = {
+    overallPct : { reading:0, remember:0, understand:0, apply:0, analyze:0 },
+    subTotals  : {},
+    updatedAt  : admin.firestore.FieldValue.serverTimestamp(),
+  };
+  if (tx) tx.set(rootRef, rootPayload);
+  else    await rootRef.set(rootPayload);
+
+  /* helper – fetch concept names for ONE sub-chapter */
+  async function fetchConceptNames(subChId) {
+    const snap = await db.collection("subchapterConcepts")
+                         .where("subChapterId", "==", subChId)
+                         .get();
+    return snap.docs.map(d =>
+         d.get("conceptName") ||            // preferred
+         d.get("name")        ||            // fall-back (your sample)
+         d.id);                             // last resort
+  }
+
+  /* 3️⃣ create shells */
+  const subsColl = rootRef.collection("subs");
+
+  // ---------- A. inside transaction ----------
+  if (tx) {
+    for (const sess of (planDoc.sessions || [])) {
+      for (const act of (sess.activities || [])) {
+        if (!act.subChapterId) continue;
+
+        const names  = await fetchConceptNames(act.subChapterId);
+        const blank  = names.reduce((m,c)=>(m[c]="NOT_TESTED",m),{});
+        const shell  = {
+          subChapterName : act.subChapterName || act.subChapterId,
+          book           : act.bookName       || "",
+          subject        : act.subject        || "",
+          grouping       : act.grouping       || "",
+          chapter        : act.chapterName    || "",
+          readingPct     : 0,
+          rememberPct    : null,
+          understandPct  : null,
+          applyPct       : null,
+          analyzePct     : null,
+          conceptStats   : {
+            remember   : { ...blank },
+            understand : { ...blank },
+            apply      : { ...blank },
+            analyze    : { ...blank },
+          },
+          nextRevisionISO: null,
+          updatedAt      : admin.firestore.FieldValue.serverTimestamp(),
+        };
+        tx.set(subsColl.doc(act.subChapterId), shell);
+      }
+    }
+    return;                   // finished inside outer txn
+  }
+
+  // ---------- B. stand-alone (batch) ----------
+  let batch  = db.batch();
+  let ops    = 0;
+  const tasks = [];
+
+  for (const sess of (planDoc.sessions || [])) {
+    for (const act of (sess.activities || [])) {
+      if (!act.subChapterId) continue;
+
+      tasks.push((async () => {
+        const names = await fetchConceptNames(act.subChapterId);
+        const blank = names.reduce((m,c)=>(m[c]="NOT_TESTED",m),{});
+        const shell = {
+          subChapterName : act.subChapterName || act.subChapterId,
+          book           : act.bookName       || "",
+          subject        : act.subject        || "",
+          grouping       : act.grouping       || "",
+          chapter        : act.chapterName    || "",
+          readingPct     : 0,
+          rememberPct    : null,
+          understandPct  : null,
+          applyPct       : null,
+          analyzePct     : null,
+          conceptStats   : {
+            remember   : { ...blank },
+            understand : { ...blank },
+            apply      : { ...blank },
+            analyze    : { ...blank },
+          },
+          nextRevisionISO: null,
+          updatedAt      : admin.firestore.FieldValue.serverTimestamp(),
+        };
+
+        batch.set(subsColl.doc(act.subChapterId), shell);
+
+        if (++ops === 450) {
+          await batch.commit();
+          batch = db.batch();
+          ops   = 0;
+        }
+      })());
+    }
+  }
+
+  await Promise.all(tasks);
+  if (ops) await batch.commit();
+}
+/* ───── end createEmptyPlanSummary ───── */
+/* ───────────────────── end helper ───────────────────── */
+
+const FieldValue  = admin.firestore.FieldValue;
+
+/* ───────────────────────── helpers & constants ────────────────────── */
+const STAGES      = ["remember", "understand", "apply", "analyze"];
+const ratioToPct  = r => Math.min(100, Math.round((r || 0) * 100));
+
+/* ====================================================================
+   1 ▸ Reading event
+   --------------------------------------------------------------------
+   • Path (flat):  reading_demo/{activityId}
+   • Required fields in that doc:
+       planId          string
+       subChapterId    string
+       readingStartTime / readingEndTime
+   • Logic :
+       ─ startTime only      →  50 %
+       ─ start + end         → 100 %
+       ─ neither             →   0 %
+
+
+
+
+/* ───────────────────────────── helpers ──────────────────────────── */
+
+
+/* ──────────────────────────────────────────────────────────
+   1 ▸ Reading event
+─────────────────────────────────────────────────────────── */
+exports.onReadingEvent = onDocumentWritten(
+  { document: "reading_demo/{activityId}" },
+  async (event) => {
+
+    const after = event.data?.after;
+    if (!after?.exists) return;                   // ignore deletes
+
+    const d       = after.data() || {};
+    const planId  = d.planId;
+    const subId   = d.subChapterId;
+    if (!planId || !subId) return;
+
+    const pct =
+      d.readingEndTime     ? 100 :
+      d.readingStartTime   ?  50 : 0;
+
+    await db.doc(`adaptivePlanSummaries/${planId}/subs/${subId}`)
+            .set({ readingPct:pct,
+                   updatedAt: FieldValue.serverTimestamp() },
+                 { merge:true });
+  }
+);
+
+/* ──────────────────────────────────────────────────────────
+   2 ▸ Quiz attempt
+─────────────────────────────────────────────────────────── */
+exports.onQuizAttempt = onDocumentCreated(
+  { document: "quizzes_demo/{attemptId}" },
+  async (event) => {
+
+    const a        = event.data.data() || {};
+    const planId   = a.planId;
+    const subId    = a.subchapterId;
+    const stage    = (a.quizType || "").toLowerCase();
+    if (!planId || !subId || !STAGES.includes(stage)) return;
+
+    /* build concept → PASS/FAIL (this attempt only) */
+    const attemptMap = {};
+    (a.quizSubmission || []).forEach(q=>{
+      const name = q.conceptName || "Unknown";
+      attemptMap[name] = (Number(q.score) >= 1) ? "PASS" : "FAIL";
+    });
+
+    const subRef = db.doc(`adaptivePlanSummaries/${planId}/subs/${subId}`);
+
+    await db.runTransaction(async tx => {
+      const snap    = await tx.get(subRef);
+      const base    = snap.exists ? (snap.data() || {}) : {};
+
+      /* ensure nested structure exists */
+      const conceptStats = base.conceptStats || {};
+      STAGES.forEach(st => { conceptStats[st] = conceptStats[st] || {}; });
+
+      /* merge: keep first PASS for each concept within this stage */
+      Object.entries(attemptMap).forEach(([c,res])=>{
+        if (res === "PASS" || !conceptStats[stage][c])
+            conceptStats[stage][c] = res;
+      });
+
+      /* recompute pct for *this* stage */
+      const vals = Object.values(conceptStats[stage]);
+      const pct  = vals.length
+        ? ratioToPct(vals.filter(v=>v==="PASS").length / vals.length)
+        : null;
+
+      tx.set(subRef,{
+        conceptStats,
+        [`${stage}Pct`]: pct,
+        updatedAt      : FieldValue.serverTimestamp(),
+      },{ merge:true });
+    });
+  }
+);
+
+/* ──────────────────────────────────────────────────────────
+   3 ▸ Revision attempt
+─────────────────────────────────────────────────────────── */
+exports.onRevisionAttempt = onDocumentCreated(
+  { document: "revision_demo/{revId}" },
+  async (event) => {
+    const r      = event.data.data() || {};
+    const planId = r.planId;
+    const subId  = r.subchapterId;
+    if (!planId || !subId) return;
+
+    await db.doc(`adaptivePlanSummaries/${planId}/subs/${subId}`)
+            .set({
+              nextRevisionISO : null,                 // reset
+              updatedAt       : FieldValue.serverTimestamp(),
+            },{ merge:true });
+  }
+);
+
+
+
 exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
   /* ───── Allow CORS pre-flight ───── */
   res.set("Access-Control-Allow-Origin",  "*");
@@ -3815,6 +4071,8 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
               chapterName: chapter.name || "",
               subChapterId: sub.id,
               subChapterName: sub.name || "",
+              subject         : chapter.subject  || "Unknown",
+              grouping        : chapter.grouping || "Other",
             };
           }
         }
@@ -3877,34 +4135,42 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
       logDetails: [...logDetails, `leftoverTasks=${leftovers}`],
     };
 
-    const { ref: newPlanRef, fullDoc } = await db.runTransaction(async (tx) => {
-            // 1️⃣ how many existing plans for this user?
-            const snap = await tx.get(
-              db.collection("adaptive_demo").where("userId", "==", userId)
-            );
-            const nextIndex = snap.size + 1;              // 1-based
-      
-            // 2️⃣ build name & full payload
-            const planName  = `Study Plan ${nextIndex}`;    // e.g. studyplan4
-            const fullDoc   = {
-              ...planDocBase,
-              planIndex: nextIndex,                       // keep the raw integer
-              planName,                                   // store the display string
-            };
-      
-            // 3️⃣ create the plan inside the same txn
-            const ref = db.collection("adaptive_demo").doc();
-            tx.set(ref, fullDoc);
-            return { ref, fullDoc };  // ✅ send both out of the txn
-          });
+     const { planRef, fullDoc } = await db.runTransaction(async (tx) => {
 
-
-          return res.status(200).json({
-              message : "Plan generated (v2) with sequential study-plan name.",
-              planId  : newPlanRef.id,
-              planDoc : fullDoc,
-            
+      // 1️⃣ count existing plans for user
+      const snap      = await tx.get(
+        db.collection("adaptive_demo").where("userId", "==", userId)
+      );
+      const nextIndex = snap.size + 1;
+    
+      // 2️⃣ build full payload
+      const planName = `Study Plan ${nextIndex}`;
+      const fullDoc  = { ...planDocBase, planIndex: nextIndex, planName };
+    
+      // 3️⃣ prepare the *new* plan ref
+         const planRef = db.collection("adaptive_demo").doc();   // keep the name
+    
+      // 4️⃣ seed empty summary  (READS first, then WRITES)
+      await createEmptyPlanSummary({
+        uid:    userId,
+        planId: planRef.id,
+        planDoc: fullDoc,
+        tx                                      // pass txn handle
+      });
+    
+      // 5️⃣ finally write the plan itself  (our *first* write in this txn)
+      tx.set(planRef, fullDoc);
+    
+         return { planRef, fullDoc };            // return using the same key
     });
+
+      // ✅ summary already seeded *inside* the transaction – no second call needed
+
+  return res.status(200).json({
+    message : "Plan generated (v2) with sequential study-plan name.",
+    planId  : planRef.id,          // use the variable we returned
+    planDoc : fullDoc,
+  });
 
   } catch (err) {
     console.error("generateAdaptivePlan2 error:", err);
