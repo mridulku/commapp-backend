@@ -3807,6 +3807,75 @@ exports.onRevisionAttempt = onDocumentCreated(
 );
 
 
+/* ──────────────────────────────────────────────────────────
+   4 ▸ Promote concepts to spaced-repetition docs
+       – fires the FIRST time analyzePct hits 100 %
+─────────────────────────────────────────────────────────── */
+exports.onAnalyzeComplete = onDocumentUpdated(
+  { document: "adaptivePlanSummaries/{planId}/subs/{subId}" },
+  async (event) => {
+
+    const before = event.data.before.data();
+    const after  = event.data.after .data();
+    if (!before || !after) return;                // safety
+
+    /* 1) Only continue if we just crossed the 100 % threshold */
+    if ((before.analyzePct ?? 0) === 100) return; // was already done earlier
+    if ((after .analyzePct ?? 0) !== 100) return; // not yet fully analysed
+
+    const planId = event.params.planId;
+    const subId  = event.params.subId;
+
+    /* 2) Pull the PASS list for analyse stage */
+    const csAnalyze = after.conceptStats?.analyze || {};
+    const passedConcepts = Object.entries(csAnalyze)
+                                 .filter(([,res]) => res === "PASS")
+                                 .map(([name])   => name);
+
+    if (!passedConcepts.length) return;           // nothing to promote
+
+    /* 3) Prepare refs */
+    const rootRef     = event.data.after.ref.parent.parent; // /adaptivePlanSummaries/{planId}
+    const conceptsCol =  rootRef.collection("concepts");
+    const subsRef     = event.data.after.ref;               // /subs/{subId}
+
+    /* 4) Write SR docs + pointer map in ONE atomic batch      */
+    await db.runTransaction(async (tx) => {
+
+      const subsSnap = await tx.get(subsRef);
+      const subsData = subsSnap.data() || {};
+      const map      = { ...(subsData.srDocIds || {}) };
+
+      for (const conceptName of passedConcepts) {
+        if (map[conceptName]) continue;           // already seeded earlier
+
+        const srRef = conceptsCol.doc();          // auto-id
+        tx.set(srRef, {
+          planId, subId, conceptName,
+          easeFactor   : 2.5,                     // SM-2 defaults
+          intervalDays : 0,
+          nextDue      : admin.firestore.Timestamp.now(),
+          attempts     : [],                      // will grow over time
+          createdAt    : admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt    : admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        map[conceptName] = srRef.id;              // remember pointer
+      }
+
+      tx.update(subsRef, {
+        srDocIds : map,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+
+    console.log(
+      `[Analyze→SR] Promoted ${passedConcepts.length} concepts for`,
+      `plan=${planId} sub=${subId}`
+    );
+  }
+);
+
 
 exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
   /* ───── Allow CORS pre-flight ───── */
@@ -3903,6 +3972,15 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     const persona   = personaSnap.docs[0].data();
     const finalWpm  = wpmOverride          || persona.wpm;
     const finalMins = dailyReadingOverride || persona.dailyReadingTime;
+
+   if (finalMins < 15) {
+   return res
+     .status(400)
+    .json({ error: "dailyReadingTime must be at least 15 minutes." });
+}
+
+
+
     let   maxDayCnt = maxDaysOverride !== null ? maxDaysOverride : maxDayDefault;
 
     /* ───── D) Exam config ───── */
@@ -4080,15 +4158,43 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
     }
 
     /* ───── H) Schedule into sessions (unchanged) ───── */
+
+    function makeCumulativeQuiz(dayNumber) {
+  return {
+    activityId: uuidv4(),
+    type: "QUIZ",
+    quizStage: "cumulativeQuiz",
+    timeNeeded: 5,
+    displayName: `Day ${dayNumber} – Cumulative Quiz`,
+  };
+}
+
+function makeCumulativeRevision(dayNumber) {
+  return {
+    activityId: uuidv4(),
+    type: "QUIZ",
+    quizStage: "cumulativeRevision",
+    timeNeeded: 5,
+    displayName: `Day ${dayNumber} – Cumulative Revision`,
+  };
+}
+
+
+
     const sessions = [];
     let dayIdx = 1;
 
     function distribute(tasks) {
       let queue = [...tasks];
       while (queue.length && dayIdx <= maxDayCnt) {
-        let used = 0, today = [];
+            let used = 0;
+    let today = [];
+
+    // quota: day-1 gets full minutes, others leave room for 2×5-min cumulatives
+    const quota = dayIdx === 1 ? finalMins : finalMins - 10;
+
         while (queue.length) {
-          const left = finalMins - used;
+                const left = quota - used;
           if (left <= 0) break;
           const next = queue[0];
           if ((next.timeNeeded||1) <= left) {
@@ -4097,6 +4203,17 @@ exports.generateAdaptivePlan2 = onRequest(async (req, res) => {
             queue.shift();
           } else break;
         }
+
+            // Inject cumulative tasks for days ≥ 2
+    if (dayIdx > 1) {
+      today.unshift(makeCumulativeQuiz(dayIdx));
+      today.push(makeCumulativeRevision(dayIdx));
+      // their 10 min are *added* on top of whatever was packed
+    }
+
+
+
+
         if (today.length) {
           sessions.push({ sessionLabel:String(dayIdx), activities: today });
         }
