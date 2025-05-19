@@ -1617,25 +1617,19 @@ exports.cloneExamBookOnUserCreate = onDocumentWritten(
     }
 
     /*──────────────────────────── helper: clone one book ─────────────────*/
-    const cloneFnURL =
-      "https://us-central1-comm-app-ff74b.cloudfunctions.net/cloneStandardBook";
+   async function templateMeta(templateId) {
+  // read the name once so the UI can display it
+  const docSnap = await admin
+    .firestore()
+    .collection("books_demo")
+    .doc(templateId)
+    .get();
 
-    async function cloneBook(templateId) {
-      const resp = await fetch(cloneFnURL, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ standardBookId: templateId, targetUserId: userId }),
-      });
-      if (!resp.ok) throw new Error(`cloneStandardBook ${resp.status}`);
+  const bookName = docSnap.exists ? docSnap.data().name : null;
 
-      const { newBookId } = await resp.json();
-
-      const docSnap = await admin.firestore().collection("books_demo")
-        .doc(templateId).get();
-      const bookName = docSnap.exists ? docSnap.data().name : null;
-
-      return { oldBookId: templateId, newBookId, bookName };
-    }
+  /* key point ↓↓↓  both fields are identical – no clone created */
+  return { oldBookId: templateId, newBookId: templateId, bookName };
+}
 
     try {
       /*──────────────────── 1) find the exam template book ───────────────*/
@@ -1652,10 +1646,8 @@ exports.cloneExamBookOnUserCreate = onDocumentWritten(
       }
 
       const templateId = tplSnap.docs[0].id;
-      const clonedBook = await cloneBook(templateId);
-
-      /*──────────────────── 2) clone the universal onboarding book ───────*/
-      const onboardingClone = await cloneBook(UNIVERSAL_ONBOARDING_ID);
+      const clonedBook      = await templateMeta(templateId);
+const onboardingClone = await templateMeta(UNIVERSAL_ONBOARDING_ID);
 
       const planResp = await fetch(
         `https://us-central1-comm-app-ff74b.cloudfunctions.net/generateOnboardingPlan` +

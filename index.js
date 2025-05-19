@@ -2440,7 +2440,6 @@ app.get('/api/process-book-data', async (req, res) => {
     // 1) Fetch chapters from "chapters_demo" matching userId & bookId
     const chaptersSnap = await db
       .collection('chapters_demo')
-      .where('userId', '==', userId)
       .where('bookId', '==', bookId)
       .get();
 
@@ -2454,7 +2453,6 @@ app.get('/api/process-book-data', async (req, res) => {
       // fetch subchapters for this chapter
       const subSnap = await db
         .collection('subchapters_demo')
-        .where('userId', '==', userId)
         .where('bookId', '==', bookId)
         .where('chapterId', '==', chapterId)
         .get();
